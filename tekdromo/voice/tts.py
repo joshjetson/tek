@@ -160,6 +160,32 @@ VOICES = {"piper": PiperVoice, "pico": PicoVoice,
 ORDER = ["piper", "pico", "flite", "espeak"]      # best first
 
 
+def piper_models():
+    """Piper voice models present in voices/, newest-looking first.
+
+    Piper is one engine with many interchangeable models - 38 English voices
+    upstream, plus multi-speaker models with hundreds more. Treating the model
+    as part of the voice NAME ("piper:en_GB-alan-medium") means all of them are
+    reachable through the same Voice interface, with no second code path and
+    nothing hardcoded to one file.
+    """
+    try:
+        names = [f[:-len(".onnx")] for f in os.listdir(VOICE_DIR)
+                 if f.endswith(".onnx")
+                 and os.path.exists(os.path.join(VOICE_DIR, f + ".json"))]
+    except OSError:
+        return []
+    return sorted(names)
+
+
+def _split(name):
+    """"piper:en_US-amy-medium" -> ("piper", "<voices>/en_US-amy-medium")."""
+    if not name or ":" not in name:
+        return name, DEFAULT_MODEL
+    engine, model = name.split(":", 1)
+    return engine, os.path.join(VOICE_DIR, model)
+
+
 def load(name=None, model=DEFAULT_MODEL):
     """Build a voice, falling back down the quality order if one won't start.
 
@@ -167,26 +193,42 @@ def load(name=None, model=DEFAULT_MODEL):
     deliberately not in git, so a fresh checkout has no voice until it is
     fetched. Speaking badly beats not speaking.
     """
-    names = [name] if name else ORDER
+    if name and ":" in name:
+        engine, model = _split(name)
+        names = [engine]
+    else:
+        names = [name] if name else ORDER
     errors = []
     for n in names:
         cls = VOICES.get(n)
         if cls is None:
             raise ValueError("unknown voice %r; have %s"
-                             % (n, ", ".join(ORDER)))
+                             % (n, ", ".join(ORDER + ["piper:<model>"])))
         try:
-            return cls(model) if n == "piper" else cls()
+            v = cls(model) if n == "piper" else cls()
+            if n == "piper":
+                # Carry the model in the name so `tek status` says WHICH voice,
+                # not just "piper" - with 38 of them that distinction matters.
+                v.name = "piper:" + os.path.basename(model)
+            return v
         except Exception as e:
             errors.append("%s: %s" % (n, e))
     raise RuntimeError("no voice available (%s)" % "; ".join(errors))
 
 
+def all_names():
+    """Every voice that can be asked for: the native engines, plus one entry
+    per installed Piper model."""
+    return (["piper:" + m for m in piper_models()]
+            + [n for n in ORDER if n != "piper"])
+
+
 def available():
     """Which voices actually work here. Used by `tek voices`."""
     out = []
-    for n in ORDER:
+    for n in all_names():
         try:
-            v = VOICES[n](DEFAULT_MODEL) if n == "piper" else VOICES[n]()
+            v = load(n)
             out.append((n, True, "%d Hz" % v.rate))
             v.close()
         except Exception as e:

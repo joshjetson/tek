@@ -14,7 +14,38 @@ import argparse
 import socket
 import sys
 
+VOICE_ENGINES = ("piper", "pico", "flite", "espeak")
+
 from . import bus
+
+
+def _normalise(name):
+    """Accept a bare Piper model name where a voice name is expected.
+
+    "en_US-kusal-medium" and "piper:en_US-kusal-medium" mean the same thing to
+    a person; only one of them used to work, and only in one subcommand. One
+    helper, used everywhere a voice can be named.
+    """
+    n = (name or "").strip()
+    if not n or ":" in n:
+        return n
+    if n in VOICE_ENGINES:
+        return n
+    return "piper:" + n if "-" in n else n
+
+
+def _spoken(name):
+    """A voice name a voice can actually read out."""
+    n = name.split(":", 1)[-1]
+    for lang, word in (("en_US-", ""), ("en_GB-", "British ")):
+        if n.startswith(lang):
+            n = word + n[len(lang):]
+            break
+    for q in ("-medium", "-high", "-low"):
+        if n.endswith(q):
+            n = n[:-len(q)]
+            break
+    return n.replace("_", " ")
 
 
 def _client(path, timeout=120.0):
@@ -37,6 +68,27 @@ def main(argv=None):
     p.add_argument("text", nargs="+")
     p.add_argument("--no-wait", action="store_true",
                    help="return immediately instead of waiting for the end")
+    p.add_argument("--voice", default=None,
+                   help="speak this once in another voice, without changing "
+                        "the default")
+
+    p = sub.add_parser("audition",
+                       help="hear every voice say the same line, out loud")
+    p.add_argument("text", nargs="*",
+                   help="what each voice should say (default: a set line)")
+    p.add_argument("--all", action="store_true",
+                   help="every installed voice, Piper models and native "
+                        "engines alike")
+    p.add_argument("--piper", action="store_true",
+                   help="only the Piper models. This is usually what you want "
+                        "when choosing a voice - pico/flite/espeak are "
+                        "fallbacks, not candidates.")
+    p.add_argument("--voices", default=None,
+                   help="comma-separated list to audition exactly, e.g. "
+                        "en_US-amy-medium,en_GB-alan-medium")
+
+    p = sub.add_parser("voice", help="set the default voice, permanently")
+    p.add_argument("name", help="piper|pico|flite|espeak")
 
     sub.add_parser("status", help="service state")
     sub.add_parser("voices", help="which voices work here")
@@ -56,7 +108,8 @@ def main(argv=None):
         if c is None:
             return 1
         r = c.request({"cmd": "say", "text": " ".join(a.text),
-                       "wait": not a.no_wait})
+                       "wait": not a.no_wait,
+                       "voice": _normalise(a.voice) if a.voice else None})
         c.close()
         if not r or not r.get("ok"):
             sys.stderr.write("failed: %s\n" % (r or {}).get("error", "no reply"))
@@ -65,6 +118,57 @@ def main(argv=None):
             print("spoke %.2fs (%s, synth %.2fs)"
                   % (r["duration"], r.get("voice", "?"), r.get("synth", 0)))
         return 0
+
+    if a.cmd == "audition":
+        # Through the real speaker, in the real room. Judging a voice from a
+        # waveform or a laptop is not the same test - this one has to sound
+        # right on THAT speaker, at that distance.
+        from . import tts
+        line = " ".join(a.text) if a.text else (
+            "This is voice number %d. I would sound like this every day, "
+            "reading you the weather, or answering a question from across "
+            "the room.")
+        c = _client(a.socket, timeout=300.0)
+        if c is None:
+            return 1
+        if a.voices:
+            names = [_normalise(n) for n in a.voices.split(",") if n.strip()]
+        elif a.piper:
+            names = ["piper:" + m for m in tts.piper_models()]
+        elif a.all:
+            names = tts.all_names()
+        else:
+            names = tts.ORDER
+        for i, name in enumerate(names, 1):
+            said = line % i if "%d" in line else line
+            print("  %d/%d  %s" % (i, len(names), name))
+            # Speak a human label, not the model id: "piper:en_GB-alan-medium"
+            # comes out as "piper colon en underscore G B alan medium", which
+            # is unusable when the whole point is to judge how it sounds.
+            c.request({"cmd": "say", "text": "Voice %d. %s." % (i, _spoken(name)),
+                       "voice": name})
+            r = c.request({"cmd": "say", "text": said, "voice": name})
+            if not r or not r.get("ok"):
+                print("       unavailable: %s" % (r or {}).get("error"))
+        c.close()
+        print("\n  pick one with:  tek voice <name>")
+        return 0
+
+    if a.cmd == "voice":
+        c = _client(a.socket, timeout=120.0)
+        if c is None:
+            return 1
+        r = c.request({"cmd": "set_voice", "voice": _normalise(a.name)})
+        if r and r.get("ok"):
+            print("default voice is now %s (%d Hz), saved across restarts"
+                  % (r["voice"], r["rate"]))
+            c.request({"cmd": "say",
+                       "text": "This is now my voice.", "voice": r["voice"]})
+            c.close()
+            return 0
+        sys.stderr.write("failed: %s\n" % (r or {}).get("error", "no reply"))
+        c.close()
+        return 1
 
     if a.cmd == "status":
         c = _client(a.socket, timeout=5.0)

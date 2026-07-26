@@ -23,13 +23,44 @@ import numpy as np
 
 from . import bus, io as vio, pcm, tts
 
+CONFIG = os.path.expanduser("~/.config/tekdromo/voice.json")
+
+
+def load_choice():
+    """The voice chosen by ear, if there is one.
+
+    Kept outside the repo because it is a per-machine preference, not code -
+    the same checkout on another box with different speakers may want a
+    different voice.
+    """
+    try:
+        import json
+        with open(CONFIG) as f:
+            return json.load(f).get("voice")
+    except Exception:
+        return None
+
+
+def save_choice(name):
+    import json
+    d = os.path.dirname(CONFIG)
+    if not os.path.isdir(d):
+        os.makedirs(d)
+    with open(CONFIG, "w") as f:
+        json.dump({"voice": name}, f)
+
 
 class VoiceService(object):
 
     def __init__(self, voice=None, device=None, path=bus.DEFAULT_PATH,
                  latency_trim=0.0):
         t0 = time.time()
-        self.voice = tts.load(voice)
+        # An explicit --voice wins; otherwise use whatever was chosen by ear.
+        self.voice = tts.load(voice or load_choice())
+        # Alternates are loaded on demand and kept, so auditioning does not
+        # pay the model load twice. Only Piper is heavy; the others are
+        # subprocess wrappers costing almost nothing.
+        self.voices = {self.voice.name: self.voice}
         self.device = device
         self.load_time = time.time() - t0
         self.spoken = 0
@@ -52,10 +83,21 @@ class VoiceService(object):
             if not text:
                 return {"ok": False, "error": "empty text"}
             try:
-                return self.say(text, wait=msg.get("wait", True))
+                return self.say(text, wait=msg.get("wait", True),
+                                voice=msg.get("voice"))
             except Exception as e:
                 traceback.print_exc()
                 return {"ok": False, "error": str(e)}
+        if cmd == "set_voice":
+            name = msg.get("voice")
+            try:
+                v = self._voice(name)
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
+            self.voice = v
+            save_choice(v.name)
+            print("voice set to %s (saved to %s)" % (v.name, CONFIG), flush=True)
+            return {"ok": True, "voice": v.name, "rate": v.rate}
         if cmd == "latency":
             # Lets the lag be trimmed by ear without a restart.
             if "seconds" in msg:
@@ -70,19 +112,28 @@ class VoiceService(object):
             return {"ok": True}
         return {"ok": False, "error": "unknown command %r" % cmd}
 
+    def _voice(self, name):
+        """A loaded Voice by name, cached."""
+        if not name or name == self.voice.name:
+            return self.voice
+        if name not in self.voices:
+            self.voices[name] = tts.load(name)
+        return self.voices[name]
+
     # -- speaking ----------------------------------------------------------
-    def say(self, text, wait=True):
+    def say(self, text, wait=True, voice=None):
         if not wait:
-            t = threading.Thread(target=self._say, args=(text,))
+            t = threading.Thread(target=self._say, args=(text, voice))
             t.daemon = True
             t.start()
             return {"ok": True, "queued": True}
-        return self._say(text)
+        return self._say(text, voice)
 
-    def _say(self, text):
+    def _say(self, text, voice=None):
         with self._lock:
+            v = self._voice(voice)
             t0 = time.time()
-            samples, rate = self.voice.synth(text)
+            samples, rate = v.synth(text)
             synth_s = time.time() - t0
             dur = len(samples) / float(rate)
             if not len(samples):
@@ -90,7 +141,7 @@ class VoiceService(object):
 
             # Rounding comes from the phonemes when the voice knows them.
             # from_envelope() cannot: an RMS level carries no vowel shape.
-            rnd = float(getattr(self.voice, "last_rounding", 0.0))
+            rnd = float(getattr(v, "last_rounding", 0.0))
 
             # Frame at the VOICE's rate so 20 ms of audio is 20 ms of mouth.
             n = int(rate * pcm.FRAME_MS / 1000)
@@ -133,14 +184,21 @@ class VoiceService(object):
             finally:
                 wt.join(timeout=dur + 10)
                 self.speaking = False
-                self.server.publish({"speaking": False})
+                # Close the mouth BEFORE announcing that speech ended. The
+                # other order looks equivalent and is not: a consumer that
+                # stops reading at speaking=False never receives the zero, and
+                # is left holding whatever the final audio frame happened to
+                # be - so the face keeps a slightly open mouth after every
+                # sentence.
                 self.server.publish({"mouth": [0.0, 0.0]})
+                self.server.publish({"speaking": False})
             self.spoken += 1
             print("said %.2fs in %.2fs (%.2fx) : %s"
-                  % (dur, synth_s, synth_s / max(dur, 1e-6), text[:60]),
+                  % (dur, synth_s, synth_s / max(dur, 1e-6),
+                     ("[%s] " % v.name) + text[:52]),
                   flush=True)
             return {"ok": True, "duration": round(dur, 2),
-                    "synth": round(synth_s, 2), "voice": self.voice.name}
+                    "synth": round(synth_s, 2), "voice": v.name}
 
     def run(self):
         self.server.start()

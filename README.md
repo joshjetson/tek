@@ -1,0 +1,448 @@
+# TEKDROMO
+
+A **Tektronix 4014 storage-tube vector display**, running on a Jetson Nano 2GB,
+rendering an animated human face that watches the room, listens, and talks.
+
+Not a smart-speaker puck. A thing with a location, an aesthetic, and continuity
+— the face *is* the interface.
+
+<sub>Everything below was built on the target hardware: 4× Cortex-A57 @1.48GHz,
+2GB RAM, Python 3.6.9, glibc 2.27. Those constraints shaped nearly every
+decision here, and where something looks odd it is usually because the obvious
+approach does not exist on this box.</sub>
+
+---
+
+## Contents
+
+1. [What it is](#1-what-it-is)
+2. [Quick start](#2-quick-start)
+3. [The voice](#3-the-voice) — including [all 38 Piper voices](#34-every-english-piper-voice)
+4. [Architecture](#4-architecture)
+5. [Hardware notes and traps](#5-hardware-notes-and-traps)
+6. [Testing](#6-testing)
+7. [Services](#7-services)
+8. [Measured results](#8-measured-results)
+9. [What is next](#9-what-is-next)
+
+---
+
+## 1. What it is
+
+Three services that together make a face which can hold a conversation.
+
+| Service | Job |
+|---|---|
+| `tek-display` | Renders the head to `/dev/fb0` at ~30 fps. Never stops. |
+| `tek-voice` | Speech in and out. Owns the voice, the speaker, the mouth stream. |
+| `tek-bluetooth` | Keeps the Bluetooth speaker connected and audio routed to it. |
+
+The aesthetic is a genuine constraint, not decoration. A Direct-View Storage
+Tube walks an electron beam point-to-point and the phosphor holds the charge,
+so: **no fills, no shading, no scanlines** (it does not scan — adding them is
+the classic fake tell), constant beam intensity, and an all-or-nothing erase
+flash.
+
+The head is not a mesh. It is an **implicit height field sliced into
+iso-contours**, which is the central idea of the whole project:
+
+```
+z(x,y) = skull + forehead + brow + nose + cheeks + lips + chin
+         − eyes − philtrum − nostrils
+for z = .95 down to −.25 step −.05:   extract contours → emit vectors
+```
+
+Because contours are level sets of the real surface, **they flow around every
+feature for free**. An earlier attempt drew feature curves onto an undeformed
+mesh and every one of them read as a decal.
+
+<sub>[↑ Contents](#contents)</sub>
+
+---
+
+## 2. Quick start
+
+```bash
+tek say "hello"                 # speak; the face mouths it
+tek status                      # which voice, is it speaking
+tek voices                      # what is installed and working
+tek audition --piper            # hear every Piper model, out loud
+tek voice en_US-kusal-medium    # set the default, permanently
+tek listen                      # watch the mouth stream live
+```
+
+A fresh checkout has **no voice models and no speech model** — they are large
+binaries, deliberately not in git:
+
+```bash
+tools/fetch_voice.sh --list                   # all English Piper voices
+tools/fetch_voice.sh en_US-kusal-medium       # ~61MB each
+# speech recognition model (~68MB):
+curl -sSL -o m.zip https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
+unzip -q m.zip -d models/ && rm m.zip
+```
+
+<sub>[↑ Contents](#contents)</sub>
+
+---
+
+## 3. The voice
+
+### 3.1 Chosen voice
+
+**`en_US-kusal-medium`** — picked by ear, out loud, through the actual Bluetooth
+speaker in the actual room. Judging a voice from a waveform or on headphones is
+a different test.
+
+Change it any time; nothing is baked in:
+
+```bash
+tek voice en_GB-alba-medium
+```
+
+The choice is stored in `~/.config/tekdromo/voice.json` — outside the repo,
+because it is a per-machine preference rather than code. The same checkout on a
+box with different speakers may want a different voice.
+
+### 3.2 Shortlist
+
+Three finalists came out of listening to 20 voices:
+
+| Voice | | Why |
+|---|---|---|
+| `en_US-kusal-medium` | **chosen** | US English |
+| `en_GB-alba-medium` | shortlisted | Scottish — the most distinctive of the three |
+| `en_US-amy-medium` | shortlisted | US English, warmer and softer than lessac |
+
+### 3.3 There are far more than 38
+
+The catalogue lists **38 English voices**, but that undersells it. Seven of them
+are *multi-speaker* models containing **1,975 more voices** — `en_US-libritts`
+alone holds 904 speakers, `en_GB-vctk` holds 109.
+
+Of the 38, only a handful are genuinely distinct speakers not yet heard:
+`danny`, `kathleen`, `reza_ibrahim`. Eight more are simply `low`/`high` quality
+variants of voices already sampled.
+
+> **On `high` quality:** medium models synthesise at **0.72× real-time** here.
+> High-quality models are larger networks and will land near or above 1.0×,
+> which means a pause before speech starts. On this board, medium is the right
+> trade.
+
+> **Multi-speaker models are not wired up yet.** They need an extra
+> `speaker_id` input that `PiperVoice` does not pass. Small change, not done.
+
+### 3.4 Every English Piper voice
+
+"Sampled" means it was played aloud through the speaker during voice selection.
+
+#### en_US
+
+| Voice | Quality | Speakers | Sampled | Note |
+|---|---|---|---|---|
+| `en_US-amy-low` | low | 1 | — |  |
+| `en_US-amy-medium` | medium | 1 | yes | shortlisted |
+| `en_US-arctic-medium` | medium | 18 | — |  |
+| `en_US-bryce-medium` | medium | 1 | yes |  |
+| `en_US-danny-low` | low | 1 | — |  |
+| `en_US-hfc_female-medium` | medium | 1 | yes |  |
+| `en_US-hfc_male-medium` | medium | 1 | yes |  |
+| `en_US-joe-medium` | medium | 1 | yes |  |
+| `en_US-john-medium` | medium | 1 | yes |  |
+| `en_US-kathleen-low` | low | 1 | — |  |
+| `en_US-kristin-medium` | medium | 1 | yes |  |
+| `en_US-kusal-medium` | medium | 1 | yes | **CHOSEN** |
+| `en_US-l2arctic-medium` | medium | 24 | — |  |
+| `en_US-lessac-high` | high | 1 | — |  |
+| `en_US-lessac-low` | low | 1 | — |  |
+| `en_US-lessac-medium` | medium | 1 | yes |  |
+| `en_US-libritts-high` | high | 904 | — |  |
+| `en_US-libritts_r-medium` | medium | 904 | — |  |
+| `en_US-ljspeech-high` | high | 1 | — |  |
+| `en_US-ljspeech-medium` | medium | 1 | yes |  |
+| `en_US-mike-medium` | medium | 1 | yes |  |
+| `en_US-norman-medium` | medium | 1 | yes |  |
+| `en_US-reza_ibrahim-medium` | medium | 1 | — |  |
+| `en_US-ryan-high` | high | 1 | — |  |
+| `en_US-ryan-low` | low | 1 | — |  |
+| `en_US-ryan-medium` | medium | 1 | yes |  |
+| `en_US-sam-medium` | medium | 1 | yes |  |
+
+#### en_GB
+
+| Voice | Quality | Speakers | Sampled | Note |
+|---|---|---|---|---|
+| `en_GB-alan-low` | low | 1 | — |  |
+| `en_GB-alan-medium` | medium | 1 | yes |  |
+| `en_GB-alba-medium` | medium | 1 | yes | shortlisted |
+| `en_GB-aru-medium` | medium | 12 | — |  |
+| `en_GB-cori-high` | high | 1 | — |  |
+| `en_GB-cori-medium` | medium | 1 | yes |  |
+| `en_GB-jenny_dioco-medium` | medium | 1 | yes |  |
+| `en_GB-northern_english_male-medium` | medium | 1 | yes |  |
+| `en_GB-semaine-medium` | medium | 4 | — |  |
+| `en_GB-southern_english_female-low` | low | 1 | yes |  |
+| `en_GB-vctk-medium` | medium | 109 | — |  |
+
+Fetch any of them:
+
+```bash
+tools/fetch_voice.sh en_US-ryan-high en_GB-cori-medium
+```
+
+### 3.5 Fallback voices
+
+Piper is what ships, but three native synths are kept behind the same `Voice`
+interface — `pico` (SVOX Pico), `flite`, `espeak`. A household assistant that
+cannot talk is useless, so if a model file is missing or onnxruntime fails to
+load, speaking badly beats not speaking.
+
+`espeak` is never an extra dependency: **it is Piper's phonemiser.**
+
+<sub>[↑ Contents](#contents)</sub>
+
+---
+
+## 4. Architecture
+
+### 4.1 The DRY spine
+
+Every stage of a voice loop either consumes audio or produces it. So there is
+**one** PCM contract — 16 kHz, mono, `int16`, 20 ms frames — and **one** pair of
+abstractions:
+
+```
+Source  yields frames        Sink  accepts frames
+```
+
+Everything else is expressed in those terms, which buys three things that are
+not merely tidy:
+
+* **A microphone and a WAV file are the same type**, so the entire pipeline was
+  built and tested before any microphone existed.
+* **The mouth is a Sink.** The audio going to the speaker and the audio driving
+  the face are not two signals kept in agreement — they are *one signal with two
+  consumers*. Lip-sync is a property of the topology.
+* **Wake word and transcription are one model with two grammars**, not two
+  engines.
+
+`pcm.RATE` is 16 kHz because that is native for Vosk *and* Whisper, so the
+recognition path needs no conversion at all. 20 ms because WebRTC's VAD accepts
+only 10/20/30 ms frames. Resampling happens **only** at hardware edges.
+
+### 4.2 Module map
+
+```
+tekdromo/
+  app.py          display application, frame loop, startup
+  anatomy.py      measured shape + FDL constants + blob/ridge primitives
+  field.py        the surface equation, neck unioned with max()
+  contour.py      marching squares, ears, back shell
+  rig.py          expression rig: controls -> regions -> cached contours
+  geometry.py     rotate, project, back-face cull
+  phosphor.py     bloom, phosphor LUT, the storage-tube look
+  starfield.py    amber backdrop, same renderer
+  camera.py       face tracking (background thread) + critically-damped follow
+  voice_link.py   display end of the voice seam (~30 lines)
+  voice/
+    pcm.py        THE audio contract + resample/envelope
+    io.py         Source/Sink; Mic/Wav/Tone, Speaker/Wav/Null/Tee/Delay
+    vad.py        WebRTC VAD segmenter with pre-roll and hang-over
+    stt.py        Vosk recognition; wake grammar + free decode
+    tts.py        Voice interface; Piper/Pico/Flite/Espeak
+    phonemes.py   espeak-ng -> IPA -> phoneme IDs (replaces piper-phonemize)
+    bus.py        line-JSON over a Unix socket, shared by both processes
+    service.py    the wiring; tek-voice entry point
+    cli.py        the `tek` command
+```
+
+### 4.3 The expression rig
+
+```
+EXPRESSIONS  named presets → control values
+     ↓
+CONTROLS     10 named scalars — the ONLY animation state
+     ↓
+REGIONS      a bbox + a field function + which controls touch it
+     ↓
+CACHE        re-contour ONE region, memoised on quantised controls
+```
+
+The face is a field, so an expression is just different numbers in the
+equation — no blendshapes, no skinning. A full rebuild is ~4 s, but an
+expression only disturbs a small box, and the field outside that box is
+unchanged so contours still meet the border exactly. Warm cost: **0.27 ms per
+frame**.
+
+Adding an expression is one line. Adding a control is one line plus a term in a
+field function. Blink is *not* an expression — it is a reflex on its own timer
+that clamps `eye_open`, so it works during any expression and during speech.
+
+### 4.4 Piper without piper-phonemize
+
+The official Piper wrapper needs Python 3.9+; this box has 3.6.9.
+`piper-phonemize` has no 3.6 build at all and is the real blocker — but it is
+only a C++ shim over espeak-ng, **which is already in apt**. So:
+
+```
+text → espeak-ng --ipa → the model's own phoneme_id_map → onnxruntime → PCM
+```
+
+and the dependency disappears. Two risks were predicted and both evaporated on
+measurement:
+
+| Predicted | Actual |
+|---|---|
+| espeak-ng 1.49.2 (2018) too old; build 1.52 from source | **100% phoneme coverage**, 0 unmapped. No build needed. |
+| ORT 1.10 (last cp36 aarch64 wheel) won't load a 2023 VITS export | Loads clean |
+
+espeak's `--ipa` **drops punctuation** and emits a newline instead, but the
+model was *trained with* punctuation phonemes — they are its pause cues. Clauses
+are phonemised separately and the punctuation put back, which is what gives it
+sentence rhythm rather than a flat monotone.
+
+A side benefit: `speech.from_envelope()` hardcodes `rounding=0` and explains
+why — *"real viseme shape needs phoneme information, which an envelope does not
+carry."* The Piper path **has** the phonemes, so the mouth rounds on /u/, /o/,
+/w/.
+
+<sub>[↑ Contents](#contents)</sub>
+
+---
+
+## 5. Hardware notes and traps
+
+Read these before debugging anything.
+
+1. **`OPENBLAS_CORETYPE=ARMV8` is mandatory.** Without it `import numpy` and
+   `import cv2` die with **SIGILL** — numpy 1.19.5's OpenBLAS misdetects the
+   A57. Set it in every new service and cron job.
+2. **systemd is 237.** `StandardOutput=append:` is silently ignored.
+   `StartLimitIntervalSec`/`StartLimitBurst` must be in **`[Unit]`**; in
+   `[Service]` they are silently ignored.
+3. **systemd drop-ins are applied in lexicographic *filename* order across all
+   directories.** `/etc` does **not** automatically beat `/lib`. An override
+   named `10-foo.conf` loses to `nv-bar.conf`; it must sort *after*.
+4. **JetPack disables A2DP.** NVIDIA ships a drop-in starting `bluetoothd` with
+   `--noplugin=audio,a2dp,avrcp`. A speaker can pair but can never carry audio.
+5. **The D-Bus policy denies uid 1000 access to `org.bluez`**, so PulseAudio
+   cannot register a media endpoint. It surfaces as `Protocol not available`
+   from BlueZ and `No default controller available` from `bluetoothctl` —
+   neither of which points at permissions. Group membership cannot fix an
+   already-running PulseAudio, so the policy names the user.
+6. **`vosk`'s `libvosk.so` needs GCC 11+ libstdc++**; this box has GCC 7.5
+   (`GLIBCXX_3.4.25`) and only 0.3.44/0.3.45 ship aarch64 wheels, both of which
+   fail. A newer libstdc++ built *for* bionic lives in `lib/` and is used by
+   `tek-voice` **only**, via `LD_LIBRARY_PATH`. The system runtime is
+   deliberately untouched — replacing it globally risks the CUDA/OpenCV stack.
+7. **`pacat`'s stdin has no backpressure.** It accepted **3.0 s of audio in
+   0.01 s**. Nothing may use write progress as an audio clock.
+8. **No desktop.** X/lightdm disabled, default target `multi-user`.
+   `tek-display` owns `/dev/fb0` continuously. `sudo systemctl stop tek-display`
+   to get the console back.
+9. **L4T is pinned at 32.5.2.** 32.7.6 exists and is the last release for t210,
+   deliberately not taken — it rewrites the bootloader and there is no backup of
+   the card.
+
+<sub>[↑ Contents](#contents)</sub>
+
+---
+
+## 6. Testing
+
+```bash
+for t in tests/*.py; do python3 "$t"; done
+```
+
+| Test | Covers | Hardware needed |
+|---|---|---|
+| `smoke.py` | end-to-end frame render | none |
+| `holecheck.py` | every expression + blends leave no holes | none |
+| `follow_unit.py` | camera follow, including integrator windup | none |
+| `boot_camera.py` | camera attaches when it appears, not only if present | none |
+| `voice_pcm.py` | framing, resampling, envelope, phoneme coverage | none |
+| `voice_loopback.py` | the whole Source/Sink pipeline on stubs | none |
+| `voice_bus.py` | protocol framing, dead subscribers, slow clients | none |
+| `voice_stt.py` | recognition + VAD, using **Piper as the test signal** | none |
+| `voice_lipsync.py` | reads `/dev/fb0` while really speaking | display + voice |
+
+`voice_stt.py` is the one worth noting: with no microphone available, **Piper
+speaks the test sentences and Vosk reads them back**. The loop closes on-box.
+That proves wiring, rates, framing, segmentation and grammar — it does *not*
+prove acoustic performance, because synthetic speech has no room noise, reverb
+or distance.
+
+<sub>[↑ Contents](#contents)</sub>
+
+---
+
+## 7. Services
+
+```bash
+systemctl status tek-display tek-voice tek-bluetooth
+tools/check_boot.sh          # verify boot survival WITHOUT rebooting
+```
+
+`tek-display` and `tek-voice` **must agree on `XDG_RUNTIME_DIR`** or each looks
+for the socket in a different place and they silently never connect.
+
+The display must never stop, and seven failure modes are handled explicitly —
+startup gap, per-frame exceptions, systemd's start limit, the console blanker, a
+wedged model, blanking on exit, and a camera that has not enumerated yet. See
+`TEKDROMO.md` §5.
+
+<sub>[↑ Contents](#contents)</sub>
+
+---
+
+## 8. Measured results
+
+Nothing in this table is an estimate.
+
+| | |
+|---|---|
+| Render | 4.6 → **45 fps** across the optimisation pass |
+| Steady state | **29.0–29.8 fps**, 0 errors, with voice running |
+| Time to first frame | 9.47 s → **1.24 s** warm, 4.79 s cold |
+| Face reconstruction | silhouette **0.996**, landmark error **3.8%** |
+| Expression rig | **0.27 ms/frame** warm |
+| Piper synthesis | **0.72× real-time** |
+| Recognition (free) | **0.17× real-time** |
+| Wake spotting | **0.11× real-time** — 11% of one core, always on |
+| Word accuracy | **100%** on synthetic test phrases |
+| Lip-sync | 5.92 s of mouth for 5.92 s of audio, paced at 20 ms |
+| Bluetooth recovery | forced disconnect → reconnected in **~10 s** |
+| Reclaimed | a full core, by disabling an idle-spinning BBS daemon |
+
+Things that were measured and did **not** help, recorded so nobody repeats them:
+
+| Idea | Result |
+|---|---|
+| CUDA bloom at 512×300 | 29 ms vs **6.8 ms** CPU pyramid — kernel launch dominates |
+| numpy fancy-index instead of `cv2.LUT` | 25.1 ms vs **7.1 ms** — 3.5× worse |
+| CUDA composite | 39.1 ms, 12.4 ms of it in upload/download alone |
+| Box blur instead of gaussian | no change |
+
+<sub>[↑ Contents](#contents)</sub>
+
+---
+
+## 9. What is next
+
+* **The conversation loop** — wake word → transcribe → `claude -p` → speak.
+  Streaming matters: with `--output-format stream-json` speech can start on the
+  first sentence instead of after the whole reply.
+* **A microphone.** Everything above the mic is built and tested; far-field
+  pickup in a real room is the open question, and it matters more than model
+  choice.
+* **Multi-speaker Piper models** — a `speaker_id` input away from ~2,000 more
+  voices.
+* **Viseme timeline** rather than a per-utterance rounding average, using the
+  model's duration predictor.
+
+<sub>[↑ Contents](#contents)</sub>
+
+---
+
+<sub>Deeper engineering notes, including the reasoning behind the face geometry
+and the full optimisation history, are in [TEKDROMO.md](TEKDROMO.md).</sub>
