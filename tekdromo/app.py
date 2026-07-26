@@ -174,9 +174,16 @@ class Display:
                     if slack > 0:
                         time.sleep(slack)
             except Exception:
-                errors += 1                        # one bad frame is not fatal
-                if errors <= 3:
+                # One bad frame is not fatal - but silently swallowing a
+                # PERSISTENT failure is worse. A stale import once had this
+                # loop crash-looping at 0 fps with 198 errors and nothing
+                # useful in the journal, because only the first 3 tracebacks
+                # were printed. Re-report periodically so a stuck loop is
+                # always visible.
+                errors += 1
+                if errors <= 3 or errors % 200 == 0:
                     traceback.print_exc()
+                    print("frame error #%d - still failing" % errors, flush=True)
                 time.sleep(0.05)
 
             now = time.time()

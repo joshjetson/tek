@@ -33,7 +33,8 @@ def build_pts_culled(verts, edges, normals, w, h, rot, dist=3.0, eps=-0.10,
     is what gives the head its outline. eps slightly negative keeps a little of
     the terminator so the shape does not look sheared off at the edges.
     """
-    from tekvector import project, rotate
+    # (this used to be a function-level `from tekvector import ...`; both
+    # functions live in this module now)
     R = rotate(np.eye(3, dtype=np.float32), *rot)
     v = verts @ R
     n = normals @ R

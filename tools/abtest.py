@@ -2,6 +2,8 @@ import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import os
+OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tek_out")
+import os
 os.environ.setdefault("OPENBLAS_CORETYPE", "ARMV8")
 import numpy as np
 import cv2
@@ -27,8 +29,8 @@ face.static = (v, e, n)      # Face punches per-frame now; pre-punching here
                              # removed the edges twice
 B = render(*face.update(0.0))                         # rig: punch + regions
 
-cv2.imwrite("/home/super/tek_out/ab_A_norig.png", A)
-cv2.imwrite("/home/super/tek_out/ab_B_rig.png", B)
+cv2.imwrite(os.path.join(OUT, "ab_A_norig.png"), A)
+cv2.imwrite(os.path.join(OUT, "ab_B_rig.png"), B)
 
 
 def lit(i):
@@ -66,5 +68,5 @@ for name, r in tekrig.REGIONS.items():
     cv2.polylines(vis, [q.reshape(-1, 1, 2)], True, (0, 255, 255), 1)
     cv2.putText(vis, name, (q[:, 0].min() + 3, q[:, 1].min() + 14),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 255), 1, cv2.LINE_AA)
-cv2.imwrite("/home/super/tek_out/ab_diff.png", vis)
+cv2.imwrite(os.path.join(OUT, "ab_diff.png"), vis)
 print("wrote ab_A_norig / ab_B_rig / ab_diff (red=removed, blue=added, yellow=boxes)")
