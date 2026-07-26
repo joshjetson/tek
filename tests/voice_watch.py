@@ -53,10 +53,27 @@ p = b.build_prompt({"kind": "arrival", "what": "someone came into view",
                     "recent": ["Hello there."]})
 check("prompt names the image file", "/tmp/x.jpg" in p)
 check("prompt carries the event", "someone came into view" in p)
-check("prompt carries face count", "Faces visible: 2" in p)
+check("prompt carries face count", "Faces detected: 2" in p)
 check("prompt carries when it last spoke", "10 minutes ago" in p, p[:0])
 check("prompt carries what it recently said", "Hello there." in p)
-check("prompt makes silence the explicit default", "STAY SILENT" in p)
+check("prompt offers silence as an explicit option", agent.SILENCE in p)
+# The lean is per-event because one blanket rule was wrong: telling the model
+# that "merely detecting a person" was a bad reason to speak meant it sat
+# silent through every arrival, which is the entire use case. Pin the three
+# leans so that cannot regress into over-restraint again.
+lean_manual = b.build_prompt({"kind": "manual", "image": "/tmp/x.jpg", "faces": 1})
+lean_arrival = b.build_prompt({"kind": "arrival", "image": "/tmp/x.jpg", "faces": 1})
+lean_other = b.build_prompt({"kind": "timer", "image": "/tmp/x.jpg", "faces": 1})
+check("a direct 'look now' leans towards speaking",
+      "not the moment for restraint" in lean_manual)
+check("an arrival leans towards greeting",
+      "appropriate and welcome" in lean_arrival)
+check("anything else still prefers silence",
+      "Prefer silence" in lean_other)
+check("the three leans are actually different",
+      len({lean_manual, lean_arrival, lean_other}) == 3)
+check("prompt warns that the camera is wide and people sit at the edge",
+      "edge of frame" in p)
 check("brain runs in a neutral cwd, not the project",
       "tekdromo/brain" in b.cwd and not b.cwd.rstrip("/").endswith("/tekdromo"),
       b.cwd)
