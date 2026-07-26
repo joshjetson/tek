@@ -503,19 +503,29 @@ After 120 s of genuine silence the voice service plays a **0.6 s tone at 40 Hz**
 faded in and out. Speech resets the timer and it is skipped while speaking, so a
 talkative evening sends none at all.
 
-Three deliberate choices, because the obvious answer is wrong:
+All four parameters are tunable and persisted, because the right values depend
+on the specific speaker and only listening settles them:
 
-* **40 Hz, not ultrasonic.** The intuitive pick is a tone above adult hearing,
-  and it is a bad idea in a house with children — hearing extends well past
-  18 kHz at their age, so a tone the adults cannot hear could quietly irritate
-  the kids all day. 40 Hz is inaudible because a portable speaker's driver
-  physically cannot reproduce it, which does not depend on whose ears are in the
-  room.
-* **−30 dBFS, not −80.** It has to be *real signal*: a speaker that sleeps on
-  silence may well treat near-silence the same way.
-* **Faded at both ends.** A waveform starting mid-cycle is a step discontinuity,
-  and a step contains every frequency — so an inaudible 40 Hz tone would
-  announce itself with an audible click through the tweeter.
+```bash
+tek keepalive --hz 200 --amp 0.02 --secs 0.25 --every 90
+```
+
+**The first attempt did not work, and the reason is worth keeping.** It used
+40 Hz, chosen *because* a portable driver cannot reproduce it — which is
+self-defeating. A speaker's auto-off detector works on the same post-filter
+signal path as its amplifier, so **a tone it cannot reproduce is a tone it
+cannot detect**. "Inaudible because unreproducible" and "invisible to the
+silence detector" are the same property. It sent 34 tones over three hours and
+the speaker switched off anyway.
+
+Ultrasonic is the other intuitive answer and is also wrong here, for a
+different reason: children hear well past 18 kHz, so a tone the adults cannot
+hear could quietly irritate the kids all day.
+
+So the tone must sit **inside** the range the speaker really plays, and be kept
+quiet and brief instead. It is still faded in and out — a waveform starting
+mid-cycle is a step discontinuity, and a step contains every frequency, so even
+an unobtrusive tone would announce itself with a click.
 
 <sub>[↑ Contents](#contents)</sub>
 

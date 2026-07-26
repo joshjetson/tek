@@ -42,13 +42,31 @@ def load_choice():
         return None
 
 
-def save_choice(name):
+def load_settings():
+    """Per-machine tuning that is not code. Same file as the voice choice."""
+    try:
+        import json
+        with open(CONFIG) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_settings(update):
     import json
+    cur = load_settings()
+    cur.update(update)
     d = os.path.dirname(CONFIG)
     if not os.path.isdir(d):
         os.makedirs(d)
     with open(CONFIG, "w") as f:
-        json.dump({"voice": name}, f)
+        json.dump(cur, f, indent=2, sort_keys=True)
+
+
+def save_choice(name):
+    # Merge, do not overwrite: writing {"voice": ...} on its own silently threw
+    # away every keepalive setting the moment the voice was changed.
+    save_settings({"voice": name})
 
 # Chunking for streaming synthesis.
 #
@@ -72,18 +90,24 @@ MIN_LEAD_S = 5.0
 # Keeping the Bluetooth speaker awake.
 #
 # Unloading module-suspend-on-idle stops PULSEAUDIO suspending the sink, but
-# the SPEAKER has its own idle timer and powers itself off when the audio it
-# receives is digital silence. So something has to actually be played.
+# the SPEAKER has its own idle timer and powers itself off. Something has to be
+# played, and it has to be something the speaker's detector actually counts.
 #
-# 40 Hz, deliberately. Portable speakers roll off hard below ~60 Hz, so this is
-# inaudible because the driver physically cannot reproduce it - not because it
-# is quiet, and not because it is above anyone's hearing. Ultrasonic was the
-# obvious alternative and is a bad idea in a house with children: hearing
-# extends well past 18 kHz at their age, so a tone adults cannot hear could
-# quietly irritate them all day.
-KEEPALIVE_HZ = 40.0
-KEEPALIVE_AMP = 0.03          # -30 dBFS: real signal, silent through a tweeter
-KEEPALIVE_SECS = 0.6
+# The first attempt used 40 Hz, chosen precisely BECAUSE a portable driver
+# cannot reproduce it - which was self-defeating. A speaker's auto-off detector
+# works on the same post-filter signal path as its amplifier, so a tone it
+# cannot reproduce is a tone it cannot detect either. "Inaudible because
+# unreproducible" and "invisible to the silence detector" are the same
+# property. It sent 34 tones over three hours and the speaker still switched
+# off.
+#
+# So: a frequency the speaker genuinely reproduces, kept brief and quiet
+# instead. Every parameter is tunable at runtime and persisted, because the
+# right values depend on the specific speaker and only listening can settle
+# them.
+KEEPALIVE_HZ = 200.0          # well inside any speaker's range
+KEEPALIVE_AMP = 0.02          # -34 dBFS: quiet, but unmistakably signal
+KEEPALIVE_SECS = 0.25         # brief enough not to read as a "sound"
 KEEPALIVE_EVERY = 120.0       # only if nothing else has been played
 
 
@@ -135,7 +159,11 @@ class VoiceService(object):
         self.recent = []
         self.events_seen = 0
         self.events_acted = 0
-        self.keepalive_every = float(keepalive)
+        cfg = load_settings()
+        self.keepalive_every = float(cfg.get("keepalive_every", keepalive))
+        self.keepalive_hz = float(cfg.get("keepalive_hz", KEEPALIVE_HZ))
+        self.keepalive_amp = float(cfg.get("keepalive_amp", KEEPALIVE_AMP))
+        self.keepalive_secs = float(cfg.get("keepalive_secs", KEEPALIVE_SECS))
         self.last_audio = time.time()
         self.keepalives = 0
         self.server = bus.Server(path, self.handle)
@@ -167,14 +195,27 @@ class VoiceService(object):
             print("voice set to %s (saved to %s)" % (v.name, CONFIG), flush=True)
             return {"ok": True, "voice": v.name, "rate": v.rate}
         if cmd == "keepalive":
-            if "every" in msg:
-                self.keepalive_every = max(0.0, float(msg["every"]))
+            changed = False
+            for key, attr, lo in (("every", "keepalive_every", 0.0),
+                                  ("hz", "keepalive_hz", 1.0),
+                                  ("amp", "keepalive_amp", 0.0),
+                                  ("secs", "keepalive_secs", 0.02)):
+                if key in msg and msg[key] is not None:
+                    setattr(self, attr, max(lo, float(msg[key])))
+                    changed = True
+            if changed:
+                save_settings({
+                    "keepalive_every": self.keepalive_every,
+                    "keepalive_hz": self.keepalive_hz,
+                    "keepalive_amp": self.keepalive_amp,
+                    "keepalive_secs": self.keepalive_secs})
             if msg.get("now"):
                 self._keepalive()
             return {"ok": True, "every": self.keepalive_every,
                     "sent": self.keepalives,
                     "idle": round(time.time() - self.last_audio, 1),
-                    "hz": KEEPALIVE_HZ, "amp": KEEPALIVE_AMP}
+                    "hz": self.keepalive_hz, "amp": self.keepalive_amp,
+                    "secs": self.keepalive_secs}
         if cmd == "event":
             return self.on_event(msg.get("event") or {})
         if cmd == "watch":
@@ -215,7 +256,8 @@ class VoiceService(object):
             return False
         try:
             rate = 44100          # the sink's native rate; no conversion
-            sig = pcm.tone(KEEPALIVE_HZ, KEEPALIVE_SECS, KEEPALIVE_AMP, rate)
+            sig = pcm.tone(self.keepalive_hz, self.keepalive_secs,
+                           self.keepalive_amp, rate)
             sink = vio.SpeakerSink(device=self.device, rate=rate)
             try:
                 for f in pcm.frames(sig, int(rate * pcm.FRAME_MS / 1000)):
@@ -224,6 +266,11 @@ class VoiceService(object):
                 sink.close()
             self.keepalives += 1
             self.last_audio = time.time()
+            # Logged so a disconnect can be correlated against the last nudge.
+            print("keepalive #%d (%.0fHz %.0fms at %.0f%%)"
+                  % (self.keepalives, self.keepalive_hz,
+                     self.keepalive_secs * 1000, self.keepalive_amp * 100),
+                  flush=True)
             return True
         except Exception:
             traceback.print_exc()

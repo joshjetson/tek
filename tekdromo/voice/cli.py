@@ -106,6 +106,14 @@ def main(argv=None):
                        help="inaudible tone that stops the speaker sleeping")
     p.add_argument("--every", type=float, default=None,
                    help="seconds of silence before nudging it; 0 disables")
+    p.add_argument("--hz", type=float, default=None,
+                   help="tone frequency. Must be something the speaker can "
+                        "actually reproduce - a tone it cannot play is also a "
+                        "tone its silence detector cannot see.")
+    p.add_argument("--amp", type=float, default=None,
+                   help="amplitude 0..1. Lower is quieter; too low and the "
+                        "speaker treats it as silence and sleeps anyway.")
+    p.add_argument("--secs", type=float, default=None, help="tone length")
     p.add_argument("--now", action="store_true", help="send one immediately")
 
     sub.add_parser("status", help="service state")
@@ -231,16 +239,19 @@ def main(argv=None):
         if c is None:
             return 1
         msg = {"cmd": "keepalive"}
-        if a.every is not None:
-            msg["every"] = a.every
+        for k in ("every", "hz", "amp", "secs"):
+            v = getattr(a, k)
+            if v is not None:
+                msg[k] = v
         if a.now:
             msg["now"] = True
         r = c.request(msg) or {}
         c.close()
         print("  every      %s" % ("off" if not r.get("every")
                                    else "%.0fs of silence" % r["every"]))
-        print("  tone       %.0f Hz at %.0f%% (below what a portable speaker "
-              "can reproduce)" % (r.get("hz", 0), (r.get("amp") or 0) * 100))
+        print("  tone       %.0f Hz, %.0f ms, %.1f%% amplitude"
+              % (r.get("hz", 0), (r.get("secs") or 0) * 1000,
+                 (r.get("amp") or 0) * 100))
         print("  sent       %s" % r.get("sent"))
         print("  idle for   %.0fs" % (r.get("idle") or 0))
         return 0

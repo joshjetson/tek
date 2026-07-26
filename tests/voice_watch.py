@@ -150,8 +150,14 @@ k = _pcm.tone(service.KEEPALIVE_HZ, service.KEEPALIVE_SECS,
               service.KEEPALIVE_AMP, 44100)
 check("keepalive tone is not digital silence", int(abs(k).max()) > 0,
       int(abs(k).max()))
-check("keepalive tone is low frequency, below what a portable speaker "
-      "reproduces", service.KEEPALIVE_HZ <= 60, service.KEEPALIVE_HZ)
+# The first version used 40 Hz precisely BECAUSE a portable driver cannot
+# reproduce it - which is self-defeating: a speaker's auto-off detector works
+# on the same post-filter path as its amplifier, so a tone it cannot reproduce
+# is a tone it cannot detect. It sent 34 tones over three hours and the speaker
+# still switched off. The tone must sit inside the range the speaker actually
+# plays.
+check("keepalive tone is INSIDE the speaker's reproducible range",
+      100 <= service.KEEPALIVE_HZ <= 8000, service.KEEPALIVE_HZ)
 check("keepalive tone is NOT ultrasonic (children hear past 18kHz)",
       service.KEEPALIVE_HZ < 15000, service.KEEPALIVE_HZ)
 check("keepalive tone is quiet", service.KEEPALIVE_AMP <= 0.1,
