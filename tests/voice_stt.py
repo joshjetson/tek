@@ -17,7 +17,19 @@ import sys
 import time
 
 os.environ.setdefault("OPENBLAS_CORETYPE", "ARMV8")
-os.environ.setdefault("LD_LIBRARY_PATH", "/home/super/tekdromo/lib")
+
+# vosk's libvosk.so needs a newer libstdc++ than this box ships, kept in lib/.
+# LD_LIBRARY_PATH must be set BEFORE the process starts - the dynamic linker
+# reads it at exec time, so os.environ.setdefault() here does nothing at all.
+# This test appeared to pass for a while purely because the variable happened
+# to be set on the command line; run on its own it failed to load vosk.
+# Re-exec once with the right environment rather than requiring the caller to
+# know.
+_LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib")
+if os.path.isdir(_LIB) and _LIB not in os.environ.get("LD_LIBRARY_PATH", ""):
+    os.environ["LD_LIBRARY_PATH"] = _LIB + ":" + os.environ.get("LD_LIBRARY_PATH", "")
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np

@@ -15,6 +15,7 @@ being played, so the face cannot drift out of step with the audio.
 """
 import argparse
 import os
+import re
 import threading
 import time
 import traceback
@@ -48,6 +49,40 @@ def save_choice(name):
         os.makedirs(d)
     with open(CONFIG, "w") as f:
         json.dump({"voice": name}, f)
+
+# Chunking for streaming synthesis.
+#
+# Chunk sizes RAMP. The first is short because it alone sets how long the
+# listener waits for any sound; later ones grow because bigger units give
+# Piper better prosody, and by then the producer is far ahead.
+#
+# The ramp is not cosmetic. Synthesis runs at ~0.71x real-time, so each second
+# of playback buys only 0.4 s of lead - which means the danger of starving is
+# entirely at the START, before any lead has accumulated. Going straight from a
+# 90-character chunk to a 260-character one made chunk 2 take ~8 s to
+# synthesise while chunk 1 bought only ~4.5 s of audio, and playback caught up:
+# three silences of 1.3-1.7 s in a 72 s reply.
+_SENT = re.compile(r'(?<=[.!?])\s+')
+CHUNK_RAMP = [90, 140, 200, 260, 320]
+# Never start speaking on less than this much buffered audio. With the ramp
+# above this is what actually guarantees the producer stays ahead for the rest
+# of the reply, at the cost of ~1 s more before the first word.
+MIN_LEAD_S = 5.0
+
+
+def _chunks(text):
+    sentences = [x.strip() for x in _SENT.split((text or "").strip()) if x.strip()]
+    out, buf = [], ""
+    for sent in sentences:
+        limit = CHUNK_RAMP[min(len(out), len(CHUNK_RAMP) - 1)]
+        if buf and len(buf) + len(sent) + 1 > limit:
+            out.append(buf)
+            buf = sent
+        else:
+            buf = (buf + " " + sent).strip()
+    if buf:
+        out.append(buf)
+    return out
 
 
 class VoiceService(object):
@@ -130,40 +165,84 @@ class VoiceService(object):
         return self._say(text, voice)
 
     def _say(self, text, voice=None):
+        """Speak, synthesising AHEAD of playback so there are no gaps.
+
+        Saying a long reply as one synth call means waiting for all of it
+        before a sound comes out - ~85 s for a two-minute answer. Saying it as
+        a series of separate calls is worse: each one opens a sink, plays, and
+        closes it, so every sentence boundary becomes a silence the length of
+        the NEXT sentence's synthesis. That is audible and it is what a
+        listener describes as "too many breaks - it is not fluid".
+
+        Piper runs at ~0.72x real-time, comfortably faster than speech. So one
+        sink is opened for the whole reply, a producer thread stays ahead of
+        it, and playback is continuous from the first sentence to the last.
+        """
         with self._lock:
             v = self._voice(voice)
-            t0 = time.time()
-            samples, rate = v.synth(text)
-            synth_s = time.time() - t0
-            dur = len(samples) / float(rate)
-            if not len(samples):
-                return {"ok": False, "error": "voice produced no audio"}
+            parts = _chunks(text)
+            if not parts:
+                return {"ok": False, "error": "nothing to say"}
 
-            # Rounding comes from the phonemes when the voice knows them.
-            # from_envelope() cannot: an RMS level carries no vowel shape.
-            rnd = float(getattr(v, "last_rounding", 0.0))
-
-            # Frame at the VOICE's rate so 20 ms of audio is 20 ms of mouth.
+            rate = v.rate
             n = int(rate * pcm.FRAME_MS / 1000)
-            chunks = list(pcm.frames(np.asarray(samples), n))
-            envs = [pcm.envelope(f) for f in chunks]
+            frames = []                 # grows as synthesis proceeds
+            envs = []
+            done = threading.Event()
+            state = {"synth": 0.0, "audio": 0.0, "rounding": 0.0, "error": None}
+
+            def produce():
+                try:
+                    for part in parts:
+                        t0 = time.time()
+                        samples, _ = v.synth(part)
+                        state["synth"] += time.time() - t0
+                        if not len(samples):
+                            continue
+                        state["rounding"] = float(
+                            getattr(v, "last_rounding", state["rounding"]))
+                        for f in pcm.frames(np.asarray(samples), n):
+                            frames.append(f)
+                            envs.append(pcm.envelope(f))
+                        state["audio"] = len(frames) * pcm.FRAME_MS / 1000.0
+                except Exception as e:
+                    state["error"] = str(e)
+                    traceback.print_exc()
+                finally:
+                    done.set()
+
+            pt = threading.Thread(target=produce)
+            pt.daemon = True
+            pt.start()
+
+            # Build a head start before opening the speaker. Waiting only for
+            # the first chunk is not enough: the lead has to be big enough that
+            # the producer, running at 0.71x, never gets overtaken later.
+            need = int(MIN_LEAD_S * 1000 / pcm.FRAME_MS)
+            while len(frames) < need and not done.is_set():
+                time.sleep(0.02)
+            if not frames:
+                return {"ok": False,
+                        "error": state["error"] or "voice produced no audio"}
 
             self.speaking = True
-            self.server.publish({"speaking": True, "text": text,
-                                 "duration": round(dur, 2)})
+            self.server.publish({"speaking": True, "text": text})
             sink = vio.SpeakerSink(device=self.device, rate=rate)
 
-            # The audio is written as fast as PulseAudio will take it, on its
-            # own thread. It CANNOT be used as a clock: pacat's stdin is a pipe
-            # and it accepted 3.0 s of audio in 0.01 s, so driving the mouth
-            # from the write loop animated an entire sentence in ten
-            # milliseconds and then left the face still for the rest of it.
-            # That is exactly what it looked like - the face stopped long
-            # before the voice did.
+            # ONE sink for the entire reply. Opening a new one per sentence is
+            # what put a gap at every boundary: pacat startup plus the A2DP
+            # stream being torn down and rebuilt.
             def writer():
+                i = 0
                 try:
-                    for f in chunks:
-                        sink.write(f)
+                    while True:
+                        if i < len(frames):
+                            sink.write(frames[i])
+                            i += 1
+                        elif done.is_set():
+                            break
+                        else:
+                            time.sleep(0.01)   # producer is behind; wait
                 finally:
                     sink.close()
 
@@ -171,34 +250,43 @@ class VoiceService(object):
             wt.daemon = True
             wt.start()
 
-            # The mouth runs on the wall clock instead, offset by however long
-            # the sound takes to actually emerge. A2DP is 150-250 ms of that.
+            # The mouth runs on the wall clock - pacat's stdin has no
+            # backpressure and cannot be used as an audio clock - offset by
+            # however long the sound takes to emerge. A2DP is most of that.
             try:
-                start = time.time() + self.latency
+                t_start = time.time() + self.latency
                 step = pcm.FRAME_MS / 1000.0
-                for i, e in enumerate(envs):
-                    slack = (start + i * step) - time.time()
+                i = 0
+                while True:
+                    if i >= len(envs):
+                        if done.is_set():
+                            break
+                        time.sleep(0.01)
+                        continue
+                    slack = (t_start + i * step) - time.time()
                     if slack > 0:
                         time.sleep(slack)
-                    self.server.publish({"mouth": [round(e, 4), round(rnd, 3)]})
+                    self.server.publish({"mouth": [round(envs[i], 4),
+                                                   round(state["rounding"], 3)]})
+                    i += 1
             finally:
-                wt.join(timeout=dur + 10)
+                wt.join(timeout=state["audio"] + 30)
                 self.speaking = False
-                # Close the mouth BEFORE announcing that speech ended. The
-                # other order looks equivalent and is not: a consumer that
-                # stops reading at speaking=False never receives the zero, and
-                # is left holding whatever the final audio frame happened to
-                # be - so the face keeps a slightly open mouth after every
-                # sentence.
+                # Close the mouth BEFORE announcing speech ended: a consumer
+                # that stops reading at speaking=False would otherwise never
+                # receive the zero and would hold the last audio frame open.
                 self.server.publish({"mouth": [0.0, 0.0]})
                 self.server.publish({"speaking": False})
+
             self.spoken += 1
-            print("said %.2fs in %.2fs (%.2fx) : %s"
-                  % (dur, synth_s, synth_s / max(dur, 1e-6),
-                     ("[%s] " % v.name) + text[:52]),
+            dur = state["audio"]
+            print("said %.1fs in %.1fs (%.2fx, %d chunks) [%s] %s"
+                  % (dur, state["synth"], state["synth"] / max(dur, 1e-6),
+                     len(parts), v.name, text[:44].replace("\n", " ")),
                   flush=True)
             return {"ok": True, "duration": round(dur, 2),
-                    "synth": round(synth_s, 2), "voice": v.name}
+                    "synth": round(state["synth"], 2), "chunks": len(parts),
+                    "voice": v.name}
 
     def run(self):
         self.server.start()

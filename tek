@@ -4,7 +4,22 @@ import os
 import sys
 
 os.environ.setdefault("OPENBLAS_CORETYPE", "ARMV8")   # numpy SIGILLs without it
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# The voice socket lives under XDG_RUNTIME_DIR, which is set for login shells
+# but not for cron, systemd units, or a bare `sh -c`. Defaulting it here means
+# `tek say` works from anywhere instead of failing with "cannot reach the voice
+# service" in exactly the situations where nobody is watching.
+if not os.environ.get("XDG_RUNTIME_DIR"):
+    for cand in ("/run/user/%d" % os.getuid(), "/tmp"):
+        if os.path.isdir(cand):
+            os.environ["XDG_RUNTIME_DIR"] = cand
+            break
+# vosk's libvosk.so needs a newer libstdc++ than this box ships; harmless when
+# unused, and required the moment anything here touches recognition.
+_lib = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")
+if os.path.isdir(_lib) and _lib not in os.environ.get("LD_LIBRARY_PATH", ""):
+    os.environ["LD_LIBRARY_PATH"] = _lib + ":" + os.environ.get("LD_LIBRARY_PATH", "")
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 from tekdromo.voice.cli import main
 

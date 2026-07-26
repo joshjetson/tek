@@ -17,7 +17,7 @@ approach does not exist on this box.</sub>
 
 1. [What it is](#1-what-it-is)
 2. [Quick start](#2-quick-start)
-3. [The voice](#3-the-voice) — including [all 38 Piper voices](#34-every-english-piper-voice)
+3. [The voice](#3-the-voice) — [all 38 Piper voices](#34-every-english-piper-voice) · [**how to speak (read this first)**](#36-speaking-from-a-shell--the-mouth-harness)
 4. [Architecture](#4-architecture)
 5. [Hardware notes and traps](#5-hardware-notes-and-traps)
 6. [Testing](#6-testing)
@@ -62,8 +62,16 @@ mesh and every one of them read as a decal.
 
 ## 2. Quick start
 
+Put `tek` on your PATH once (it sets its own environment — `OPENBLAS_CORETYPE`,
+`XDG_RUNTIME_DIR`, `LD_LIBRARY_PATH` — so it works from any shell, cron job or
+service):
+
 ```bash
-tek say "hello"                 # speak; the face mouths it
+ln -sf "$PWD/tek" ~/.local/bin/tek
+```
+
+```bash
+tek say "hello"                 # speak; the face mouths it (see 3.6 first)
 tek status                      # which voice, is it speaking
 tek voices                      # what is installed and working
 tek audition --piper            # hear every Piper model, out loud
@@ -198,6 +206,91 @@ cannot talk is useless, so if a model file is missing or onnxruntime fails to
 load, speaking badly beats not speaking.
 
 `espeak` is never an extra dependency: **it is Piper's phonemiser.**
+
+### 3.6 Speaking from a shell — the mouth harness
+
+> **If you are an assistant driving this machine, read this section before
+> using the voice.** Two mistakes were made here the hard way and both are
+> avoidable.
+
+```bash
+tek say "the entire reply, in one call"
+```
+
+That is all it takes. No file, no temp buffer, no setup. The text goes from the
+command straight to the speaker, and the face mouths it from the same PCM.
+
+#### Rule 1 — pass the whole reply in ONE call
+
+**Do not split a reply across several `tek say` calls.** It is the obvious thing
+to do and it sounds broken.
+
+Each call opens a speaker, plays, closes it, and returns. So every boundary
+becomes a silence as long as the *next* part takes to synthesise — roughly 0.7×
+its spoken length. A listener describes the result as *"too many breaks, it is
+not fluid"*, and they are right.
+
+Inside a single call the service already streams properly: it splits the text
+into ramped chunks, synthesises **ahead of** playback, and writes everything to
+one continuous sink. Measured on a 73-second reply:
+
+| | one call | split across 8 calls |
+|---|---|---|
+| Gaps over 250 ms | **0** | one at every boundary |
+| Median frame gap | 20 ms | 20 ms, with ~1.5 s holes |
+
+#### Rule 2 — expect a beat before long replies, and none before short ones
+
+| Reply length | Time to first word | Why |
+|---|---|---|
+| A sentence or two | effectively immediate | synthesis finishes before the head-start threshold is reached, so the wait is skipped |
+| A paragraph or more | **~5.5 s** | builds `MIN_LEAD_S` of buffered audio first |
+
+That head start is not padding. Synthesis runs at **0.71× real-time**, so each
+second of playback buys only 0.4 s of lead — which means the risk of playback
+overtaking synthesis is entirely at the *start*, before any lead exists. Without
+it, a long reply breaks up three or four times in the first half and is smooth
+thereafter.
+
+The effect is that conversation paces itself about right: quick answers come
+back instantly, a considered one takes a beat before it starts.
+
+#### Shell quoting
+
+Double quotes are fine, and so are apostrophes inside them:
+
+```bash
+tek say "I don't think that's the real problem."
+```
+
+Avoid `"`, `$`, backticks and `\` in the text — the shell will eat them. If the
+wording needs any of those, write it to a file and pass it in:
+
+```bash
+tek say "$(tr '\n' ' ' < reply.txt)"
+```
+
+A file is **never** required for ordinary sentences. Reaching for one by default
+is just caution about quoting, not a limitation of the harness.
+
+#### Other flags
+
+```bash
+tek say --no-wait "working on it"        # return immediately; narrate progress
+tek say --voice pico "compare this"      # one-off voice, default unchanged
+tek listen                               # watch the mouth stream live
+```
+
+`--no-wait` is the right choice when narrating long-running work, so the shell
+carries on while the sentence plays.
+
+#### Writing for the ear
+
+Text that reads well is not the same as text that *hears* well. Shorter
+sentences, less subordinate-clause nesting, and real punctuation — the model was
+trained **with** punctuation phonemes, so commas and full stops are literally
+its pause cues. A paragraph with no punctuation comes out as a breathless
+monotone.
 
 <sub>[↑ Contents](#contents)</sub>
 
