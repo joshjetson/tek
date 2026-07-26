@@ -102,6 +102,12 @@ def main(argv=None):
     p.add_argument("--force", action="store_true",
                    help="ignore the cooldown")
 
+    p = sub.add_parser("keepalive",
+                       help="inaudible tone that stops the speaker sleeping")
+    p.add_argument("--every", type=float, default=None,
+                   help="seconds of silence before nudging it; 0 disables")
+    p.add_argument("--now", action="store_true", help="send one immediately")
+
     sub.add_parser("status", help="service state")
     sub.add_parser("voices", help="which voices work here")
     p = sub.add_parser("listen", help="print mouth frames as they are published")
@@ -218,6 +224,25 @@ def main(argv=None):
             print("  looking... (it will speak only if it decides to)")
         else:
             print("  did not look: %s" % r.get("reason"))
+        return 0
+
+    if a.cmd == "keepalive":
+        c = _client(a.socket, timeout=30.0)
+        if c is None:
+            return 1
+        msg = {"cmd": "keepalive"}
+        if a.every is not None:
+            msg["every"] = a.every
+        if a.now:
+            msg["now"] = True
+        r = c.request(msg) or {}
+        c.close()
+        print("  every      %s" % ("off" if not r.get("every")
+                                   else "%.0fs of silence" % r["every"]))
+        print("  tone       %.0f Hz at %.0f%% (below what a portable speaker "
+              "can reproduce)" % (r.get("hz", 0), (r.get("amp") or 0) * 100))
+        print("  sent       %s" % r.get("sent"))
+        print("  idle for   %.0fs" % (r.get("idle") or 0))
         return 0
 
     if a.cmd == "status":

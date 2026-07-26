@@ -142,6 +142,43 @@ check("the brain is given the image", ev.get("image") == "/tmp/y.jpg", ev)
 check("the brain is told what was recently said", "recent" in ev, ev)
 check("the brain is told when it last spoke", "last_spoken_ago" in ev, ev)
 
+# -- keeping the speaker awake --------------------------------------------
+# The tone has to be real signal (a speaker that sleeps on digital silence must
+# see something) while being inaudible in practice. Both halves are pinned.
+from tekdromo.voice import pcm as _pcm
+k = _pcm.tone(service.KEEPALIVE_HZ, service.KEEPALIVE_SECS,
+              service.KEEPALIVE_AMP, 44100)
+check("keepalive tone is not digital silence", int(abs(k).max()) > 0,
+      int(abs(k).max()))
+check("keepalive tone is low frequency, below what a portable speaker "
+      "reproduces", service.KEEPALIVE_HZ <= 60, service.KEEPALIVE_HZ)
+check("keepalive tone is NOT ultrasonic (children hear past 18kHz)",
+      service.KEEPALIVE_HZ < 15000, service.KEEPALIVE_HZ)
+check("keepalive tone is quiet", service.KEEPALIVE_AMP <= 0.1,
+      service.KEEPALIVE_AMP)
+check("keepalive tone starts and ends at zero (a click would be audible even "
+      "when the tone is not)", k[0] == 0 and k[-1] == 0, (k[0], k[-1]))
+
+played = []
+svc.last_audio = 0.0
+svc.speaking = False
+real_sink = service.vio.SpeakerSink
+service.vio.SpeakerSink = lambda device=None, rate=16000: type(
+    "S", (), {"write": lambda self, f: played.append(f),
+              "close": lambda self: None})()
+try:
+    check("keepalive plays when the speaker has been idle", svc._keepalive())
+    check("it actually wrote audio", len(played) > 10, len(played))
+    n = len(played)
+    svc.speaking = True
+    check("keepalive is skipped while speaking", svc._keepalive() is False)
+    check("nothing was written while speaking", len(played) == n)
+    svc.speaking = False
+    svc.keepalive_every = 0
+    check("interval 0 disables it", svc.keepalive_every == 0)
+finally:
+    service.vio.SpeakerSink = real_sink
+
 svc.server.close()
 print("VOICE WATCH " + ("OK" if not FAIL else "FAILED: " + ", ".join(FAIL)))
 sys.exit(1 if FAIL else 0)

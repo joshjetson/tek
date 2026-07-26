@@ -80,6 +80,25 @@ def resample(x, src, dst):
     return out.astype(x.dtype)
 
 
+def tone(freq, seconds, amp=0.3, rate=RATE, fade=0.05):
+    """A sine burst with a raised-cosine fade at each end.
+
+    The fade is not cosmetic. Starting or stopping a waveform at a non-zero
+    sample is a step discontinuity, and a step contains every frequency - so an
+    otherwise inaudible 40 Hz tone would announce itself with a click through
+    a tweeter that cannot reproduce the tone at all.
+    """
+    n = max(1, int(rate * seconds))
+    t = np.arange(n, dtype=np.float32) / float(rate)
+    sig = amp * np.sin(2.0 * np.pi * freq * t)
+    f = int(min(fade, seconds / 2.0) * rate)
+    if f > 1:
+        ramp = 0.5 - 0.5 * np.cos(np.linspace(0, np.pi, f, dtype=np.float32))
+        sig[:f] *= ramp
+        sig[-f:] *= ramp[::-1]
+    return from_float(sig)
+
+
 def envelope(frame):
     """RMS of a frame as 0..1. This is what drives the mouth.
 

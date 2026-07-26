@@ -100,10 +100,9 @@ class WavSource(ArraySource):
 class ToneSource(ArraySource):
     """A sine burst. Useful for proving an output path end to end."""
 
-    def __init__(self, freq=440.0, seconds=1.0, amp=0.3, rate=pcm.RATE):
-        t = np.arange(int(rate * seconds), dtype=np.float32) / rate
-        ArraySource.__init__(self, pcm.from_float(amp * np.sin(2 * np.pi * freq * t)),
-                             rate)
+    def __init__(self, freq=440.0, seconds=1.0, amp=0.3, rate=pcm.RATE,
+                 fade=0.0):
+        ArraySource.__init__(self, pcm.tone(freq, seconds, amp, rate, fade), rate)
 
 
 class MicSource(Source):

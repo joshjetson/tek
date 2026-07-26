@@ -69,6 +69,23 @@ CHUNK_RAMP = [90, 140, 200, 260, 320]
 # of the reply, at the cost of ~1 s more before the first word.
 MIN_LEAD_S = 5.0
 
+# Keeping the Bluetooth speaker awake.
+#
+# Unloading module-suspend-on-idle stops PULSEAUDIO suspending the sink, but
+# the SPEAKER has its own idle timer and powers itself off when the audio it
+# receives is digital silence. So something has to actually be played.
+#
+# 40 Hz, deliberately. Portable speakers roll off hard below ~60 Hz, so this is
+# inaudible because the driver physically cannot reproduce it - not because it
+# is quiet, and not because it is above anyone's hearing. Ultrasonic was the
+# obvious alternative and is a bad idea in a house with children: hearing
+# extends well past 18 kHz at their age, so a tone adults cannot hear could
+# quietly irritate them all day.
+KEEPALIVE_HZ = 40.0
+KEEPALIVE_AMP = 0.03          # -30 dBFS: real signal, silent through a tweeter
+KEEPALIVE_SECS = 0.6
+KEEPALIVE_EVERY = 120.0       # only if nothing else has been played
+
 
 def _chunks(text):
     sentences = [x.strip() for x in _SENT.split((text or "").strip()) if x.strip()]
@@ -88,7 +105,8 @@ def _chunks(text):
 class VoiceService(object):
 
     def __init__(self, voice=None, device=None, path=bus.DEFAULT_PATH,
-                 latency_trim=0.0, brain_model=None, cooldown=180.0):
+                 latency_trim=0.0, brain_model=None, cooldown=180.0,
+                 keepalive=KEEPALIVE_EVERY):
         t0 = time.time()
         # An explicit --voice wins; otherwise use whatever was chosen by ear.
         self.voice = tts.load(voice or load_choice())
@@ -117,6 +135,9 @@ class VoiceService(object):
         self.recent = []
         self.events_seen = 0
         self.events_acted = 0
+        self.keepalive_every = float(keepalive)
+        self.last_audio = time.time()
+        self.keepalives = 0
         self.server = bus.Server(path, self.handle)
         print("voice=%s %dHz (loaded in %.2fs)  mouth lag %.0fms  socket=%s"
               % (self.voice.name, self.voice.rate, self.load_time,
@@ -145,6 +166,15 @@ class VoiceService(object):
             save_choice(v.name)
             print("voice set to %s (saved to %s)" % (v.name, CONFIG), flush=True)
             return {"ok": True, "voice": v.name, "rate": v.rate}
+        if cmd == "keepalive":
+            if "every" in msg:
+                self.keepalive_every = max(0.0, float(msg["every"]))
+            if msg.get("now"):
+                self._keepalive()
+            return {"ok": True, "every": self.keepalive_every,
+                    "sent": self.keepalives,
+                    "idle": round(time.time() - self.last_audio, 1),
+                    "hz": KEEPALIVE_HZ, "amp": KEEPALIVE_AMP}
         if cmd == "event":
             return self.on_event(msg.get("event") or {})
         if cmd == "watch":
@@ -170,6 +200,44 @@ class VoiceService(object):
         if cmd == "ping":
             return {"ok": True}
         return {"ok": False, "error": "unknown command %r" % cmd}
+
+    # -- keeping the speaker awake -----------------------------------------
+    def _keepalive(self):
+        """Play a brief inaudible tone so the speaker does not power down.
+
+        Skipped entirely while speaking: the lock would serialise it behind the
+        utterance anyway, and there is no point nudging a speaker that is
+        already being driven.
+        """
+        if self.speaking:
+            return False
+        if not self._lock.acquire(False):
+            return False
+        try:
+            rate = 44100          # the sink's native rate; no conversion
+            sig = pcm.tone(KEEPALIVE_HZ, KEEPALIVE_SECS, KEEPALIVE_AMP, rate)
+            sink = vio.SpeakerSink(device=self.device, rate=rate)
+            try:
+                for f in pcm.frames(sig, int(rate * pcm.FRAME_MS / 1000)):
+                    sink.write(f)
+            finally:
+                sink.close()
+            self.keepalives += 1
+            self.last_audio = time.time()
+            return True
+        except Exception:
+            traceback.print_exc()
+            return False
+        finally:
+            self._lock.release()
+
+    def _keepalive_loop(self):
+        while True:
+            time.sleep(5.0)
+            if self.keepalive_every <= 0:
+                continue
+            if time.time() - self.last_audio >= self.keepalive_every:
+                self._keepalive()
 
     # -- events ------------------------------------------------------------
     def on_event(self, ev):
@@ -357,7 +425,7 @@ class VoiceService(object):
                 self.server.publish({"speaking": False})
 
             self.spoken += 1
-            self.last_spoke = time.time()
+            self.last_spoke = self.last_audio = time.time()
             dur = state["audio"]
             print("said %.1fs in %.1fs (%.2fx, %d chunks) [%s] %s"
                   % (dur, state["synth"], state["synth"] / max(dur, 1e-6),
@@ -369,6 +437,9 @@ class VoiceService(object):
 
     def run(self):
         self.server.start()
+        k = threading.Thread(target=self._keepalive_loop)
+        k.daemon = True
+        k.start()
         try:
             while True:
                 time.sleep(3600)
@@ -388,6 +459,9 @@ def main(argv=None):
                     help="model for camera/mic decisions. Faster is better "
                          "here: a greeting that lands 13s after someone walks "
                          "in reads as a malfunction.")
+    ap.add_argument("--keepalive", type=float, default=KEEPALIVE_EVERY,
+                    help="seconds of silence before nudging the Bluetooth "
+                         "speaker with an inaudible tone. 0 disables it.")
     ap.add_argument("--cooldown", type=float, default=180.0,
                     help="minimum seconds between acting on camera events")
     ap.add_argument("--latency-trim", type=float, default=0.0,
@@ -412,7 +486,7 @@ def main(argv=None):
         sink.close()
         return 0
     VoiceService(a.voice, a.device, a.socket, a.latency_trim,
-                 a.brain_model, a.cooldown).run()
+                 a.brain_model, a.cooldown, a.keepalive).run()
     return 0
 
 
