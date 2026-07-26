@@ -27,7 +27,7 @@ import cv2
 import numpy as np
 
 from . import (contour, framebuffer, geometry, phosphor, rig, speech,
-               starfield)
+               starfield, voice_link)
 
 # Process start, captured at import so the startup report measures what the
 # user actually waits for - from exec to a picture - not from some later point.
@@ -122,6 +122,10 @@ class Display:
         self.stars = None
 
         self.cam = self.follow = None
+        # Subscribes to the voice service for mouth frames. Retries forever in
+        # its own thread, so the voice service can start later, be restarted,
+        # or never exist, without the display noticing.
+        self.mouth = voice_link.MouthLink().start()
         return self
 
     # -- watchdog ---------------------------------------------------------
@@ -226,9 +230,18 @@ class Display:
                 dt = min(0.1, now - prev)
                 prev, t = now, now - t0
 
-                # hold the mouth shut until the poses are warm
-                if self.a.talk and self.warm_done:
-                    self.face.speak(*speech.synthetic(t))
+                # The mouth, in priority order: real speech if the voice
+                # service is saying something, synthetic babble only if it was
+                # asked for, otherwise shut. Held closed until the poses are
+                # warm - a cold mouth pose costs ~53ms, three frames.
+                if self.warm_done:
+                    openness, rounding = self.mouth.mouth()
+                    if openness > 0.0 or self.mouth.speaking:
+                        self.face.speak(openness, rounding)
+                    elif self.a.babble:
+                        self.face.speak(*speech.synthetic(t))
+                    else:
+                        self.face.speak(0.0, 0.0)
                 rx, ry = self.pose(t, dt)
                 v, e, n = self.face.update(t, dt)
                 pts = geometry.build_pts_culled(v, e, n, self.w, self.h,
@@ -292,6 +305,7 @@ class Display:
         back.
         """
         self.running = False
+        self.mouth.stop()
         if self.cam is not None:
             self.cam.stop()
         try:
@@ -320,8 +334,11 @@ def main(argv=None):
                     help="blank the panel on exit. Off by default so a service "
                          "restart holds the last picture instead of going "
                          "black - see Display.close.")
-    ap.add_argument("--no-talk", dest="talk", action="store_false",
-                    help="leave the mouth at rest")
+    ap.add_argument("--babble", action="store_true",
+                    help="move the mouth with synthetic syllables when nothing "
+                         "is actually being said. Off by default now that real "
+                         "speech drives it - babbling while silent reads as a "
+                         "malfunction rather than as life.")
     a = ap.parse_args(argv)
 
     import signal

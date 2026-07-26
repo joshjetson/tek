@@ -1,0 +1,89 @@
+"""
+Display-side link to the voice service.
+
+The display and the voice service are separate processes because speech is
+bursty and CPU-hungry and the render loop must never stall. This is the display
+end of that seam, and it is deliberately tiny: it subscribes, keeps the latest
+mouth frame in an attribute, and nothing in the frame loop ever blocks on it.
+
+The mouth values it receives are computed from the SAME PCM that is being
+played, so the face cannot drift out of step with the audio - lip-sync is a
+property of the topology rather than something kept in agreement by hand.
+
+Connection is retried forever. The voice service may start later than the
+display, be restarted, or not exist at all; none of those are allowed to affect
+rendering, so a failure here costs exactly one unused thread.
+"""
+import threading
+import time
+
+from .voice import bus
+
+
+class MouthLink(object):
+    """Latest (openness, rounding) from the voice service, or (0, 0).
+
+        link = MouthLink().start()
+        openness, rounding = link.mouth()
+    """
+
+    # If the voice service dies mid-utterance the last frame would otherwise
+    # stick, leaving the mouth hanging open. Anything older than this is
+    # treated as silence.
+    STALE = 0.35
+
+    def __init__(self, path=bus.DEFAULT_PATH, retry=3.0):
+        self.path = path
+        self.retry = retry
+        self.running = True
+        self.connected = False
+        self.speaking = False
+        self._mouth = (0.0, 0.0)
+        self._at = 0.0
+
+    def start(self):
+        t = threading.Thread(target=self._loop)
+        t.daemon = True
+        t.start()
+        return self
+
+    def _loop(self):
+        while self.running:
+            client = None
+            try:
+                client = bus.Client(self.path)
+                client.subscribe()
+                self.connected = True
+                for msg in client:
+                    if not self.running:
+                        break
+                    if "mouth" in msg:
+                        m = msg["mouth"]
+                        self._mouth = (float(m[0]), float(m[1]))
+                        self._at = time.time()
+                    if "speaking" in msg:
+                        self.speaking = bool(msg["speaking"])
+                        if not self.speaking:
+                            self._mouth = (0.0, 0.0)
+            except Exception:
+                pass                       # service down: retry, never raise
+            finally:
+                self.connected = False
+                self.speaking = False
+                self._mouth = (0.0, 0.0)
+                if client is not None:
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+            if self.running:
+                time.sleep(self.retry)
+
+    def mouth(self):
+        """(openness, rounding). Never blocks, never raises."""
+        if time.time() - self._at > self.STALE:
+            return 0.0, 0.0
+        return self._mouth
+
+    def stop(self):
+        self.running = False

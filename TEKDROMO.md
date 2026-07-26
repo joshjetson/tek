@@ -234,6 +234,85 @@ lines. It now reports by `_PID`.
 
 ---
 
+## 5b. Voice — ears and a mouth
+
+Built and tested with no microphone and no speaker attached, because at the
+time there were none.
+
+### The DRY spine
+
+Every stage of a voice loop either consumes audio or produces it, so there is
+**one** PCM contract — 16 kHz, mono, `int16`, 20 ms frames — and **one** pair of
+abstractions: `Source` yields frames, `Sink` accepts them. Everything else is
+expressed in those terms, which buys three things that are not just tidiness:
+
+* A microphone and a WAV file are the same type, so `tests/voice_loopback.py`
+  exercises the real pipeline with zero hardware.
+* **The mouth is a Sink.** The audio going to the speaker and the audio driving
+  the face are not two signals kept in agreement — they are one signal with two
+  consumers. Lip-sync is a property of the topology.
+* Wake word and transcription will be one engine with two grammars, not two
+  models.
+
+`pcm.RATE` is 16 kHz because that is native for Vosk *and* Whisper, so the
+recognition path needs no conversion at all. Resampling happens only at
+hardware edges.
+
+### Piper on a stack that officially cannot run it
+
+The official wrapper needs Python 3.9+; this box has 3.6.9 and glibc 2.27. Two
+risks were predicted and both evaporated on measurement:
+
+| Predicted | Actual |
+|---|---|
+| espeak-ng 1.49.2 (2018) too old — build 1.52 from source | **100% phoneme coverage**, 0 unmapped. No build needed. |
+| ORT 1.10 (last cp36 aarch64 wheel) won't load a 2023 VITS export | Loads clean |
+
+`piper-phonemize` has no Python 3.6 build and is the actual blocker — but it is
+only a C++ shim over espeak-ng, which is already in apt. So the path is
+`espeak-ng --ipa` → the model's own `phoneme_id_map` → onnxruntime, and the
+dependency disappears. **0.72× real-time**: faster than speech.
+
+espeak's `--ipa` drops punctuation and emits a newline instead, but the model
+was *trained with* punctuation phonemes — they are its pause cues. Clauses are
+phonemised separately and the punctuation put back, which is what gives it
+sentence rhythm instead of a flat monotone.
+
+A side benefit: `speech.from_envelope()` hardcodes `rounding=0` and says why —
+"real viseme shape needs phoneme information, which an envelope does not
+carry." The Piper path *has* the phonemes, so the mouth rounds on /u/, /o/, /w/.
+
+### The mouth ran 300× too fast
+
+`pacat`'s stdin is a pipe with no backpressure: it accepted **3.0 s of audio in
+0.01 s**. Driving the mouth from the write loop therefore animated an entire
+sentence in ten milliseconds and left the face still for the rest of it —
+reported from across the room as *"it stopped before you stopped"*.
+
+The mouth now runs on the wall clock, offset by the sink latency PulseAudio
+reports (232 ms here, mostly A2DP). `tests/voice_lipsync.py` pins it: the mouth
+stream must last as long as the audio, paced at ~20 ms.
+
+### Bluetooth on JetPack
+
+Three faults, each masking the next:
+
+1. NVIDIA's drop-in starts `bluetoothd` with `--noplugin=audio,a2dp,avrcp` —
+   A2DP disabled outright. The override must sort **after** `nv-` in filename
+   order; systemd applies drop-ins lexicographically by filename and `/etc`
+   does not automatically beat `/lib`.
+2. The D-Bus policy denies uid 1000 access to `org.bluez`, so PulseAudio cannot
+   register a media endpoint. Surfaces as `Protocol not available` from BlueZ
+   and `No default controller available` from `bluetoothctl` — neither of which
+   points at permissions. Group membership cannot fix a *running* PulseAudio.
+3. `module-suspend-on-idle` suspends the sink, the speaker sees no stream and
+   drops the link.
+
+`tek-bluetooth.service` reasserts all three continuously. Verified by forcing a
+disconnect: recovered in ~10 s.
+
+---
+
 ## 6. File map
 
 ```
