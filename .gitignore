@@ -1,0 +1,20 @@
+# Whitelist approach: /home/super holds ~81GB of unrelated data (propdata,
+# Documents, Images, opencv_src, ...). Ignore everything at the top level, then
+# re-admit only the project's own files.
+/*
+
+!/.gitignore
+!/*.py
+!/*.sh
+!/*.md
+!/faces/
+
+# generated output, caches, snapshots of built geometry
+__pycache__/
+*.pyc
+tek_out/
+.cache/
+*.npz
+*.png
+*.mp4
+*.log
