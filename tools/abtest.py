@@ -5,10 +5,10 @@ import os
 os.environ.setdefault("OPENBLAS_CORETYPE", "ARMV8")
 import numpy as np
 import cv2
-import tekrun
-import tekrig
-import tekhead
-import tekvector as tv
+from tekdromo import app as tekrun
+from tekdromo import rig as tekrig
+from tekdromo import geometry as tekhead
+from tekdromo import phosphor as tv
 
 W, H = 1024, 600
 POSE = (-0.045, 0.0, 0.0)
@@ -16,10 +16,10 @@ POSE = (-0.045, 0.0, 0.0)
 
 def render(v, e, n):
     pts = tekhead.build_pts_culled(v, e, n, W, H, POSE, 16.0, -0.05, "and", 11.4)
-    return tv.draw([(p[0], p[1]) for p in pts], W, H)
+    return tv.render_bgra(pts, W, H, tv.build_statics(W, H))[..., :3]
 
 
-v, e, n, _ = tekrun.load_geometry()
+v, e, n, _ = tekrun.load_geometry()[:3] + (True,)
 A = render(v, e, n)                                   # no rig at all
 
 face = tekrig.Face()

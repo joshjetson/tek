@@ -4,8 +4,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import os
 os.environ.setdefault("OPENBLAS_CORETYPE", "ARMV8")
 import numpy as np
-import tekrun
-import tekrig
+from tekdromo import app as tekrun
+from tekdromo import rig as tekrig
 
 v, e, n, _ = tekrun.load_geometry()
 face = tekrig.Face()
