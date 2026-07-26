@@ -1,20 +1,16 @@
-# Whitelist approach: /home/super holds ~81GB of unrelated data (propdata,
-# Documents, Images, opencv_src, ...). Ignore everything at the top level, then
-# re-admit only the project's own files.
-/*
-
-!/.gitignore
-!/*.py
-!/*.sh
-!/*.md
-!/faces/
-
-# generated output, caches, snapshots of built geometry
+# The repo root IS the project directory now, so this only has to exclude
+# generated artefacts.
+#
+# It previously used a whitelist rooted at $HOME (`/*` then re-admit patterns),
+# because the repo had been initialised in the home directory alongside ~81GB
+# of unrelated data. That was treating the symptom: the whitelist silently
+# excluded every new directory, and the entire tekdromo package went uncommitted
+# without any warning. Rooting the repo at the project fixes the cause.
 __pycache__/
 *.pyc
+
+# rendered output and screen captures
 tek_out/
-.cache/
+
+# derived geometry cache, keyed by a hash of the source
 *.npz
-*.png
-*.mp4
-*.log
