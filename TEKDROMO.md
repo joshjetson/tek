@@ -158,21 +158,79 @@ API: `face.express(name)`, `face.speak(openness, rounding)`,
 
 ---
 
-## 5. The runner (`tekrun.py`) — the display must never stop
+## 5. The runner (`tekdromo/app.py`) — the display must never stop
 
-Five failure modes, each handled:
+Seven failure modes, each handled:
 
 1. **Startup black gap** — geometry disk-cached, keyed by a hash of the source
-   files so it self-invalidates. Cold 4.2s → **warm 0.019s**. A boot screen is
-   painted before any of that.
+   files so it self-invalidates. Cold 4.2s → **warm 0.019s**.
 2. **Exception killed the process** — per-frame errors are caught, last good
-   frame stays up, loop continues.
+   frame stays up, loop continues. A *persistent* failure is re-reported
+   periodically; only printing the first three tracebacks once hid a loop
+   spinning at 0 fps with 198 errors.
 3. **systemd start limit** — `Restart=always` still gave up after 5 failures.
-   Now disabled (in `[Unit]`). Verified: **7 consecutive SIGKILLs, all
-   recovered**.
+   Now disabled (in `[Unit]`, which is where systemd 237 actually reads it).
+   Verified: **7 consecutive SIGKILLs, all recovered**.
 4. **Console blanker** — `FBIOBLANK` every 30s.
 5. **A wedged model** — watchdog thread repaints the last good frame if the
    main loop misses its deadline.
+6. **Blanking the panel on exit** — `close()` used to zero the framebuffer, so
+   every restart was black for the whole gap. It now leaves the last picture
+   up; the hardware holds it with no process running at all (verified: service
+   stopped, panel mean 80.8, 49.6% of pixels lit). Which is what a storage tube
+   does anyway. `--clear-on-exit` restores the old behaviour for hand runs.
+7. **Camera never re-attaching** — `load()` checked `/dev/video0` exactly once.
+   At boot, USB enumeration has not finished when systemd starts us, so the
+   head would never track again until someone restarted the service. Now a
+   thread waits for the device to appear. Invisible on a running machine —
+   only a real reboot or a replug would have shown it, so `tests/boot_camera.py`
+   fakes the device instead.
+
+### Time to first frame — 9.47s → 1.24s
+
+Measured end to end, from `exec` to a picture on the panel:
+
+| | before | after |
+|---|---|---|
+| import package | 1.06s | 1.06s |
+| geometry (cached) | 0.04s | 0.04s |
+| `rig.Face()` | 4.47s | **0.14s** |
+| starfield | 0.41s | *background* |
+| pose warming | 3.07s | *background* |
+| phosphor statics | 0.45s | 0.45s |
+| **first frame** | **9.47s** | **1.24s** |
+
+Three changes, in order of size:
+
+* `rig.Face()` was calling `contour.build()` itself — rebuilding the exact
+  geometry every caller already had on disk, then discarding it. It now takes
+  `static=`.
+* Pose warming (~3.0s) and the star field (~0.4s) moved behind the running
+  picture. Neither changes what the first frame looks like. Speech is gated on
+  `warm_done` so an un-warmed mouth pose can't hitch mid-word — a cold pose
+  costs ~53ms, three frames, which is the exact stutter the cache exists to
+  prevent.
+* The startup banner is only painted when the geometry cache is *cold*. On a
+  warm start it would replace the picture the previous process left on the
+  panel with a splash screen — turning an invisible restart into a visible one.
+
+Cold (first boot ever, or after a source change): 4.79s to first frame.
+
+Every start logs these numbers to the journal, so a regression shows up in
+`journalctl -u tek-display` rather than only under a benchmark.
+
+### Verifying boot survival without rebooting
+
+`tools/check_boot.sh` — unit validity, enablement and the `multi-user.target`
+symlink, start-limit settings, path existence, `OPENBLAS_CORETYPE` in the *unit*
+(not just the login shell), `video` group membership, then a genuine cold start
+with every cache cleared and a warm start after it.
+
+Two traps it hit, both of which produced a confident wrong answer first:
+`sudo` with no tty silently did nothing, so the "cold start" measured a service
+that had never stopped; and `journalctl --since` has one-second granularity, so
+a window opened right after a restart still contains the *outgoing* process's
+lines. It now reports by `_PID`.
 
 ---
 

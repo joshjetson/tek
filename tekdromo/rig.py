@@ -344,10 +344,16 @@ class Face:
         v, e, n = face.update(t)
     """
 
-    def __init__(self, verbose=False):
+    def __init__(self, static=None, verbose=False):
+        """`static` is the (verts, edges, normals) the rig composites onto.
+
+        Pass it in. Building it here costs 4.5s, and every caller already has a
+        disk-cached copy - the old signature built one anyway and had it thrown
+        away immediately, which was the single largest chunk of startup time.
+        """
         t0 = time.time()
         # static geometry: skull, ears, neck, back - nothing expressive
-        self.static = C.build(lips=False)
+        self.static = C.build(lips=True) if static is None else static
         self.regions = OrderedDict(
             (n, Region(n, s)) for n, s in REGIONS.items())
         self._edge_in = {n: self._inside_mask(self.static, r.box)

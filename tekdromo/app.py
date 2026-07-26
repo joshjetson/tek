@@ -29,6 +29,10 @@ import numpy as np
 from . import (contour, framebuffer, geometry, phosphor, rig, speech,
                starfield)
 
+# Process start, captured at import so the startup report measures what the
+# user actually waits for - from exec to a picture - not from some later point.
+T_START = time.time()
+
 CACHE_DIR = os.path.expanduser("~/.cache/tekdromo")
 SRC = [os.path.join(os.path.dirname(os.path.abspath(__file__)), f)
        for f in ("anatomy.py", "field.py", "contour.py", "rig.py")]
@@ -44,6 +48,12 @@ def _src_hash():
         except OSError:
             pass
     return h.hexdigest()[:16]
+
+
+def cache_warm():
+    """Is the geometry already on disk? Decides whether a wait is worth
+    announcing: warm is ~1.3s to a picture, cold is ~5s."""
+    return os.path.exists(os.path.join(CACHE_DIR, _src_hash() + ".npz"))
 
 
 def load_geometry():
@@ -78,7 +88,13 @@ class Display:
         framebuffer.unblank(self.fd)
         self._unblanked = time.time()
         self.statics = phosphor.build_statics(self.w, self.h)
-        self.banner("INITIALISING")
+        # Only announce a wait long enough to be worth announcing. A warm start
+        # is 1.3s; painting a banner over it would REPLACE the picture the
+        # previous process left on the panel with a splash screen, turning an
+        # invisible restart into a visible one. A cold start is ~5s, where a
+        # blank panel would just look broken.
+        if not cache_warm():
+            self.banner("BUILDING GEOMETRY")
 
     # -- setup ------------------------------------------------------------
     def banner(self, msg):
@@ -95,37 +111,17 @@ class Display:
         v, e, n, warm = load_geometry()
         print("geometry %s (%d edges)" % ("cached" if warm else "built", len(e)),
               flush=True)
-        self.banner("LOADING RIG")
-        self.face = rig.Face()
-        # unpunched: Face drops edges per frame, and only for regions whose
-        # controls have actually moved
-        self.face.static = (v, e, n)
-        self.face._edge_in = {nm: rig.Face._inside_mask(self.face.static, r.box)
-                              for nm, r in self.face.regions.items()}
+        # Hand the rig the cached geometry, unpunched - it drops edges per
+        # frame and only for regions whose controls have moved.
+        self.face = rig.Face(static=(v, e, n))
         self.face.express("neutral", blend=0.01)
-        # Pre-contour every pose speech and blinking can reach. A cold miss
-        # costs ~51ms - four frames - so without this the picture hitches the
-        # first time each new mouth shape appears.
-        self.banner("WARMING POSES")
-        self.face.warm(verbose=True)
-
-        # Static backdrop: the camera never moves, only the head, so a distant
-        # field has no parallax and can be pre-rendered once. Compositing costs
-        # 1.2ms; rendering it live would cost as much again as the face.
+        self.warm_done = False
+        # Both of these are built on a background thread once the picture is
+        # up - see _background_init. Neither is needed to draw a face, and
+        # together they were 3.5s of the startup wait.
         self.stars = None
-        if not self.a.no_stars:
-            self.banner("STARFIELD")
-            self.stars = starfield.Backdrop(self.w, self.h)
 
         self.cam = self.follow = None
-        if not self.a.no_camera and os.path.exists("/dev/video0"):
-            try:
-                from . import camera
-                self.cam = camera.Tracker().start()
-                self.follow = camera.Follower()
-                print("camera tracking active", flush=True)
-            except Exception:
-                traceback.print_exc()
         return self
 
     # -- watchdog ---------------------------------------------------------
@@ -157,17 +153,81 @@ class Display:
         w = 1.0 if st["present"] else 0.0         # presence weight
         return rx - 0.10 * gy * w, idle * (1.0 - 0.75 * w) + hy * w
 
+    def _wait_for_camera(self, period=2.0):
+        """Attach the tracker whenever a camera turns up - now, or in an hour.
+
+        This used to be a single os.path.exists check during load(), which is
+        wrong in the one case that matters: at boot, USB enumeration has not
+        finished when systemd starts us, so /dev/video0 does not exist yet and
+        the head would never track again until someone restarted the service.
+        It also meant hot-plugging did nothing. Only a real reboot or a replug
+        would have shown either.
+
+        Once started, Tracker's own loop handles unplug/replug for good, so
+        this thread's job ends at the first successful attach.
+        """
+        while self.running:
+            if os.path.exists("/dev/video0"):
+                try:
+                    from . import camera
+                    follow = camera.Follower()
+                    cam = camera.Tracker().start()
+                    # follow first: pose() reads self.cam as the guard, so the
+                    # follower must already exist when cam becomes non-None.
+                    self.follow, self.cam = follow, cam
+                    print("[%5.2fs] camera attached" % (time.time() - T_START),
+                          flush=True)
+                    return
+                except Exception:
+                    traceback.print_exc()
+            time.sleep(period)
+
+    def _background_init(self):
+        """Everything that is not needed to draw the FIRST frame.
+
+        Startup used to be 9.5s to a picture. Two of those seconds were the rig
+        rebuilding geometry the caller already had; the remaining 3.5s is this -
+        pose warming (~3.0s) and the star field (~0.4s). Neither changes what
+        the first frame looks like, so both happen behind the running picture.
+
+        Order matters: stars first, because 0.4s later the backdrop is simply
+        there, whereas warming has to finish entirely before it helps anything.
+
+        Speech is held back until warm_done, so no un-warmed mouth pose can
+        hitch mid-word. A cold pose costs ~53ms - three frames - which is
+        exactly the stutter this whole cache exists to prevent.
+        """
+        try:
+            if not self.a.no_stars:
+                self.stars = starfield.Backdrop(self.w, self.h)
+                print("[%5.2fs] starfield ready" % (time.time() - T_START),
+                      flush=True)
+            self.face.warm(verbose=False)
+            print("[%5.2fs] poses warm (%d) - speech enabled"
+                  % (time.time() - T_START,
+                     sum(len(r.cache.d) for r in self.face.regions.values())),
+                  flush=True)
+        except Exception:
+            traceback.print_exc()
+        finally:
+            self.warm_done = True
+
     def run(self):
         threading.Thread(target=self._watchdog, daemon=True).start()
+        threading.Thread(target=self._background_init, daemon=True).start()
+        if not self.a.no_camera:
+            threading.Thread(target=self._wait_for_camera, daemon=True).start()
         t0 = prev = tick = time.time()
         frames = errors = 0
+        first = True
         while self.running:
             try:
                 now = time.time()
                 dt = min(0.1, now - prev)
                 prev, t = now, now - t0
 
-                if self.a.talk:
+                # hold the mouth shut until the poses are warm
+                if self.a.talk and self.warm_done:
                     self.face.speak(*speech.synthetic(t))
                 rx, ry = self.pose(t, dt)
                 v, e, n = self.face.update(t, dt)
@@ -180,6 +240,13 @@ class Display:
                 self.screen[:] = frame
                 self.last_frame, self.last_frame_t = frame, time.time()
                 frames += 1
+                if first:
+                    # The number that matters at boot: exec -> a picture.
+                    # Logged every start so a regression shows up in the
+                    # journal instead of only under a benchmark.
+                    print("[%5.2fs] FIRST FRAME" % (time.time() - T_START),
+                          flush=True)
+                    first = False
                 # Cap the rate. Uncapped we render as fast as the CPU allows,
                 # which on a 2GB Nano at MAXN with a USB hub, wifi, bluetooth
                 # and a camera attached pushed the input rail hard enough to
@@ -212,11 +279,24 @@ class Display:
                 self._unblanked = now
 
     def close(self):
+        """Shut down WITHOUT clearing the panel.
+
+        This used to zero the framebuffer on exit, which meant every restart
+        showed black for the whole gap - process teardown, RestartSec, and the
+        new process's startup - even though the hardware was perfectly capable
+        of just holding the last picture. Leaving the image up makes a restart
+        very nearly invisible, and it is what a storage tube does anyway: the
+        image persists on the phosphor until something erases it.
+
+        Use --clear-on-exit when running by hand and you want your terminal
+        back.
+        """
         self.running = False
         if self.cam is not None:
             self.cam.stop()
         try:
-            self.screen[:] = 0
+            if self.a.clear_on_exit:
+                self.screen[:] = 0
         finally:
             del self.screen
             self.mm.close()
@@ -236,6 +316,10 @@ def main(argv=None):
                     help="frame cap. Rendering flat-out burns power for no "
                          "visible benefit and this board has thin current "
                          "headroom (see the OC ALARM note in app.run).")
+    ap.add_argument("--clear-on-exit", action="store_true",
+                    help="blank the panel on exit. Off by default so a service "
+                         "restart holds the last picture instead of going "
+                         "black - see Display.close.")
     ap.add_argument("--no-talk", dest="talk", action="store_false",
                     help="leave the mouth at rest")
     a = ap.parse_args(argv)
