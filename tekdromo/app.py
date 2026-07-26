@@ -26,7 +26,7 @@ import traceback
 import cv2
 import numpy as np
 
-from . import (contour, framebuffer, geometry, phosphor, rig, speech,
+from . import (contour, framebuffer, geometry, hud, phosphor, rig, speech,
                starfield, voice_link)
 from .voice import bus
 
@@ -134,6 +134,7 @@ class Display:
         # its own thread, so the voice service can start later, be restarted,
         # or never exist, without the display noticing.
         self.mouth = voice_link.MouthLink().start()
+        self.clock = None if self.a.no_clock else hud.Clock(self.w, self.h)
         # Camera-event state. Transitions are debounced here; the policy of
         # whether to act on them lives in the voice service.
         self._watch_state = False
@@ -327,6 +328,14 @@ class Display:
                 pts = geometry.build_pts_culled(v, e, n, self.w, self.h,
                                                 (rx, ry, 0.0), self.a.dist,
                                                 -0.05, "and", self.a.fov)
+                # HUD panels emit the same (N,2,2) segments the head does, so
+                # they are simply concatenated and go through ONE render pass.
+                # Drawing them separately would mean a second bloom and a
+                # second LUT, and two looks that drift apart.
+                if self.clock is not None:
+                    cp = self.clock.points()
+                    if len(cp):
+                        pts = np.concatenate([pts, cp]) if len(pts) else cp
                 frame = phosphor.render_bgra(pts, self.w, self.h, self.statics)
                 if self.stars is not None:
                     frame = self.stars.under(frame, t)
@@ -406,6 +415,8 @@ def main(argv=None):
     ap.add_argument("--fov", type=float, default=11.4)
     ap.add_argument("--no-camera", action="store_true")
     ap.add_argument("--no-stars", action="store_true")
+    ap.add_argument("--no-clock", action="store_true",
+                    help="hide the clock/date panel")
     ap.add_argument("--max-fps", type=float, default=30.0,
                     help="frame cap. Rendering flat-out burns power for no "
                          "visible benefit and this board has thin current "
