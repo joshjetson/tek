@@ -102,6 +102,11 @@ class Display:
         self.face._edge_in = {nm: rig.Face._inside_mask(self.face.static, r.box)
                               for nm, r in self.face.regions.items()}
         self.face.express("neutral", blend=0.01)
+        # Pre-contour every pose speech and blinking can reach. A cold miss
+        # costs ~51ms - four frames - so without this the picture hitches the
+        # first time each new mouth shape appears.
+        self.banner("WARMING POSES")
+        self.face.warm(verbose=True)
 
         self.cam = self.follow = None
         if not self.a.no_camera and os.path.exists("/dev/video0"):

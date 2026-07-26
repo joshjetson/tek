@@ -28,9 +28,16 @@ def build_statics(w, h):
     # Pre-fold the float->uint8 scale into the vignette so the composite does
     # one multiply instead of a multiply plus a separate scaling pass.
     vig = (np.clip(1.12 - 0.30 * r ** 2, 0, 1) * (255.0 / MAX_I)).astype(np.float32)
+    # uint8 copy of the vignette, as a 0..255 gain applied with cv2.multiply's
+    # built-in scale. The whole uint8 path exists because the pipeline is
+    # memory-bandwidth bound on LPDDR4: measured 29.5ms in float32 vs 17.4ms
+    # in uint8 at 1024x600, for the same picture.
+    vig_u8 = np.clip(np.clip(1.12 - 0.30 * r ** 2, 0, 1) * 255, 0, 255).astype(np.uint8)
     # Double-height grain: each frame takes a *view* at a random row offset.
     # np.roll was copying 2.4 MB per frame; a view copies nothing.
     grain = (np.random.normal(0, 0.014, (2 * h, w)) * (255.0 / MAX_I)).astype(np.float32)
+    grain_u8 = np.clip(np.random.normal(0, 0.014, (2 * h, w)) * 255 + 128,
+                       0, 255).astype(np.uint8)
     # 4-channel LUT: intensity -> BGRA, with phosphor colour, white-core
     # saturation and screen tint all baked in. Alpha pinned opaque.
     lut = np.zeros((1, 256, 4), np.uint8)
@@ -39,13 +46,30 @@ def build_statics(w, h):
         c = t * PHOSPHOR_BGR + max(t - 1.0, 0.0) * 0.55 + SCREEN_TINT
         lut[0, i, :3] = np.clip(c, 0, 1) * 255
         lut[0, i, 3] = 255
-    return vig, grain, lut
+    return vig, grain, lut, vig_u8, grain_u8
 
 def render_bgra(pts, w, h, statics, intensity=1.0):
-    vig, grain, lut = statics
-    beam = np.zeros((h, w), dtype=np.float32)
+    """Vectors -> a BGRA frame ready to memcpy into the panel.
+
+    Runs entirely in uint8. The pipeline is memory-bandwidth bound, not compute
+    bound, so halving the bytes per pass is the single biggest win available:
+    29.5ms -> 17.4ms at 1024x600 for a visually identical picture.
+
+    Things that were measured and did NOT help, so nobody repeats them:
+      numpy fancy-index instead of cv2.LUT ... 25.1ms vs 7.1ms  (3.5x WORSE)
+      np.take instead of cv2.LUT           ...  8.6ms vs 7.1ms
+      box blur instead of gaussian         ...  no change
+      LINE_8 instead of LINE_AA            ...  no change
+      CUDA composite                       ... 39.1ms, 12.4ms of it in
+                                               upload+download alone
+    OpenCV's NEON paths are already at the limit here.
+    """
+    vig, grain, lut, vig_u8, grain_u8 = statics
+    # Beam at 127 = intensity 1.0, so bloom can add another 128 before the LUT
+    # clips - that headroom is what produces the white saturated core.
+    beam = np.zeros((h, w), dtype=np.uint8)
     if len(pts):
-        cv2.polylines(beam, pts, False, intensity, 1, cv2.LINE_AA)
+        cv2.polylines(beam, pts, False, int(127 * intensity), 1, cv2.LINE_AA)
 
     # Bloom as a CPU pyramid. Measured against CUDA at this resolution:
     #   3x CUDA blur (half-res) ... 29.3 ms
@@ -57,17 +81,20 @@ def render_bgra(pts, w, h, statics, intensity=1.0):
     hw, hh = w // 2, h // 2
     small = cv2.resize(beam, (hw, hh), interpolation=cv2.INTER_AREA)
     quart = cv2.resize(small, (hw // 2, hh // 2), interpolation=cv2.INTER_AREA)
-    wide = cv2.GaussianBlur(quart, (9, 9), 0) * 0.40 + \
-           cv2.GaussianBlur(quart, (21, 21), 0) * 0.30
-    glow_s = cv2.GaussianBlur(small, (5, 5), 0) * 0.55 + \
-             cv2.resize(wide, (hw, hh), interpolation=cv2.INTER_LINEAR)
+    wide = cv2.addWeighted(cv2.GaussianBlur(quart, (9, 9), 0), 0.40,
+                           cv2.GaussianBlur(quart, (21, 21), 0), 0.30, 0)
+    glow_s = cv2.addWeighted(cv2.GaussianBlur(small, (5, 5), 0), 0.55,
+                             cv2.resize(wide, (hw, hh),
+                                        interpolation=cv2.INTER_LINEAR), 1.0, 0)
     glow = cv2.resize(glow_s, (w, h), interpolation=cv2.INTER_LINEAR)
 
     off = np.random.randint(0, h)
-    inten = cv2.add(cv2.multiply(beam, 1.15), glow)
-    inten = cv2.add(cv2.multiply(inten, vig), grain[off:off + h])
-    idx = cv2.convertScaleAbs(inten)          # scale already folded into vig
-    return cv2.LUT(cv2.cvtColor(idx, cv2.COLOR_GRAY2BGRA), lut)
+    inten = cv2.addWeighted(beam, 1.15, glow, 1.0, 0)     # saturating uint8 add
+    inten = cv2.multiply(inten, vig_u8, scale=1.0 / 255.0)  # vignette as a gain
+    # addWeighted does add-and-offset in ONE full-frame pass; add() then
+    # subtract(128) was two, and at 614k pixels every pass costs ~1.5ms.
+    inten = cv2.addWeighted(inten, 1.0, grain_u8[off:off + h], 1.0, -128.0)
+    return cv2.LUT(cv2.cvtColor(inten, cv2.COLOR_GRAY2BGRA), lut)
 
 def erase_bgra(w, h, k, statics):
     a = math.exp(-3.2 * k)

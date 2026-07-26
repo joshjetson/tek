@@ -70,19 +70,30 @@ CONTROLS = {
 DEFAULTS = {k: v[2] for k, v in CONTROLS.items()}
 
 
-def quantise(controls):
-    """Snap controls to their cache grid. Returns a hashable key."""
+def quantise(controls, names=None):
+    """Snap controls to their declared cache grid. Returns a hashable key.
+
+    THE quantisation. The step counts in CONTROLS exist precisely so that a
+    continuously-varying control (speech driving mouth_open, a camera driving
+    gaze) collapses onto a small set of reachable poses that can be cached.
+
+    Region.key used to ignore this and key on round(value * 1000) instead -
+    a thousand steps - so an animating control missed the cache on essentially
+    every frame. Measured: mouth hit rate 2%, each miss ~53ms, 98% of frames
+    over budget. That was the stutter.
+    """
     out = []
-    for name in sorted(CONTROLS):
+    for name in (sorted(CONTROLS) if names is None else names):
         lo, hi, _, steps = CONTROLS[name]
         v = float(np.clip(controls.get(name, DEFAULTS[name]), lo, hi))
         out.append(int(round((v - lo) / (hi - lo) * (steps - 1))))
     return tuple(out)
 
 
-def dequantise(key):
+def dequantise(key, names=None):
+    """Inverse of quantise: grid index -> control value."""
     out = {}
-    for i, name in enumerate(sorted(CONTROLS)):
+    for i, name in enumerate(sorted(CONTROLS) if names is None else names):
         lo, hi, _, steps = CONTROLS[name]
         out[name] = lo + (hi - lo) * key[i] / (steps - 1)
     return out
@@ -254,14 +265,21 @@ class Region:
                    for c in self.controls)
 
     def key(self, controls):
-        """Only the controls this region cares about - so a smile does not
-        invalidate the brows' cache."""
-        return tuple(round(float(controls.get(c, DEFAULTS[c])) * 1000)
-                     for c in self.controls)
+        """Cache key: this region's controls, on their declared grid.
+
+        Only the controls this region cares about, so a smile does not
+        invalidate the brows' cache.
+        """
+        return quantise(controls, self.controls)
 
     def geometry(self, controls, base_index):
-        raw = self.cache.get(self.key(controls),
-                             lambda: self._contour(controls))
+        k = self.key(controls)
+        # Contour at the SNAPPED values, not the raw ones. Otherwise the cached
+        # geometry for a key depends on whichever exact controls happened to
+        # miss first, and the cache stops being reproducible.
+        snapped = dict(controls)
+        snapped.update(dequantise(k, self.controls))
+        raw = self.cache.get(k, lambda: self._contour(snapped))
         v, e, n = raw
         return v, (e + base_index if len(e) else e), n
 
@@ -441,6 +459,40 @@ class Face:
                 shut = math.sin(math.pi * u) ** 0.6
                 self.controls["eye_open"] = min(
                     self.controls["eye_open"], 1.0 - shut)
+
+    def warm(self, verbose=False):
+        """Pre-contour every pose the idle face can reach.
+
+        A cold cache miss costs ~51ms - four frames' worth - so the first time
+        a new mouth or eye pose appears the picture visibly hitches. Since the
+        controls are quantised, the reachable set during speech and blinking is
+        small and finite, so it can simply be enumerated up front.
+
+        Measured: mouth 11 openness x 5 rounding steps, eyes 7 openness steps.
+        Roughly 60 poses, a few seconds once, and no runtime spikes afterwards.
+        """
+        import itertools
+        t0 = time.time()
+        n = 0
+        for name, r in self.regions.items():
+            grids = []
+            for c in r.controls:
+                lo, hi, dflt, steps = CONTROLS[c]
+                # speech and blink only drive these; the rest stay at rest
+                if c in ("mouth_open", "mouth_round", "eye_open"):
+                    grids.append([lo + (hi - lo) * i / (steps - 1)
+                                  for i in range(steps)])
+                else:
+                    grids.append([dflt])
+            for combo in itertools.product(*grids):
+                ctl = dict(DEFAULTS)
+                ctl.update(dict(zip(r.controls, combo)))
+                if r.is_active(ctl):
+                    r.geometry(ctl, 0)
+                    n += 1
+        if verbose:
+            print("warmed %d poses in %.1fs" % (n, time.time() - t0), flush=True)
+        return n
 
     def stats(self):
         return {n: (r.cache.hits, r.cache.misses)
