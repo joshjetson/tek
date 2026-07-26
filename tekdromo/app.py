@@ -26,7 +26,8 @@ import traceback
 import cv2
 import numpy as np
 
-from . import contour, framebuffer, geometry, phosphor, rig, speech
+from . import (contour, framebuffer, geometry, phosphor, rig, speech,
+               starfield)
 
 CACHE_DIR = os.path.expanduser("~/.cache/tekdromo")
 SRC = [os.path.join(os.path.dirname(os.path.abspath(__file__)), f)
@@ -108,6 +109,14 @@ class Display:
         self.banner("WARMING POSES")
         self.face.warm(verbose=True)
 
+        # Static backdrop: the camera never moves, only the head, so a distant
+        # field has no parallax and can be pre-rendered once. Compositing costs
+        # 1.2ms; rendering it live would cost as much again as the face.
+        self.stars = None
+        if not self.a.no_stars:
+            self.banner("STARFIELD")
+            self.stars = starfield.Backdrop(self.w, self.h)
+
         self.cam = self.follow = None
         if not self.a.no_camera and os.path.exists("/dev/video0"):
             try:
@@ -166,6 +175,8 @@ class Display:
                                                 (rx, ry, 0.0), self.a.dist,
                                                 -0.05, "and", self.a.fov)
                 frame = phosphor.render_bgra(pts, self.w, self.h, self.statics)
+                if self.stars is not None:
+                    frame = self.stars.under(frame, t)
                 self.screen[:] = frame
                 self.last_frame, self.last_frame_t = frame, time.time()
                 frames += 1
@@ -220,6 +231,7 @@ def main(argv=None):
     ap.add_argument("--dist", type=float, default=16.0)
     ap.add_argument("--fov", type=float, default=11.4)
     ap.add_argument("--no-camera", action="store_true")
+    ap.add_argument("--no-stars", action="store_true")
     ap.add_argument("--max-fps", type=float, default=30.0,
                     help="frame cap. Rendering flat-out burns power for no "
                          "visible benefit and this board has thin current "

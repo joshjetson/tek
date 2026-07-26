@@ -18,8 +18,27 @@ import numpy as np
 
 # The 4010's storage tube read as a slightly yellowed green, not pure #00FF00.
 PHOSPHOR_BGR = np.array([0.30, 1.00, 0.45], dtype=np.float32)
+# Amber (P3) - the other phosphor these terminals shipped with, used here for
+# the star backdrop so it reads as a different surface, not part of the face.
+AMBER_BGR = np.array([0.06, 0.60, 1.00], dtype=np.float32)
 SCREEN_TINT = np.array([0.010, 0.028, 0.014], dtype=np.float32)
 MAX_I = 2.0                      # intensity range packed into the 0..255 LUT
+
+
+def make_lut(colour, tint=SCREEN_TINT, core=0.55):
+    """intensity index -> BGRA, for a given phosphor colour.
+
+    One implementation, so a second phosphor cannot drift from the first. The
+    white-core term is what makes an over-driven line burn toward white, which
+    is as much a part of the look as the hue.
+    """
+    lut = np.zeros((1, 256, 4), np.uint8)
+    for i in range(256):
+        t = i / 255.0 * MAX_I
+        c = t * colour + max(t - 1.0, 0.0) * core + tint
+        lut[0, i, :3] = np.clip(c, 0, 1) * 255
+        lut[0, i, 3] = 255
+    return lut
 
 
 def build_statics(w, h):
@@ -40,12 +59,7 @@ def build_statics(w, h):
                        0, 255).astype(np.uint8)
     # 4-channel LUT: intensity -> BGRA, with phosphor colour, white-core
     # saturation and screen tint all baked in. Alpha pinned opaque.
-    lut = np.zeros((1, 256, 4), np.uint8)
-    for i in range(256):
-        t = i / 255.0 * MAX_I
-        c = t * PHOSPHOR_BGR + max(t - 1.0, 0.0) * 0.55 + SCREEN_TINT
-        lut[0, i, :3] = np.clip(c, 0, 1) * 255
-        lut[0, i, 3] = 255
+    lut = make_lut(PHOSPHOR_BGR)
     return vig, grain, lut, vig_u8, grain_u8
 
 def render_bgra(pts, w, h, statics, intensity=1.0):
