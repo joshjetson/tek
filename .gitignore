@@ -14,3 +14,7 @@ tek_out/
 
 # derived geometry cache, keyed by a hash of the source
 *.npz
+
+# Piper voice models: 61MB of binary per voice, refetchable from
+# huggingface.co/rhasspy/piper-voices - see tools/fetch_voice.sh
+voices/
