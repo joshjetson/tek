@@ -18,3 +18,9 @@ tek_out/
 # Piper voice models: 61MB of binary per voice, refetchable from
 # huggingface.co/rhasspy/piper-voices - see tools/fetch_voice.sh
 voices/
+
+# Vosk speech models: 68MB, refetchable from alphacephei.com/vosk/models
+models/
+# Side-loaded libstdc++ for vosk (see tekdromo/voice/stt.py) - a distro binary,
+# not ours to vendor.
+lib/
