@@ -22,7 +22,7 @@ import traceback
 
 import numpy as np
 
-from . import bus, io as vio, pcm, tts
+from . import agent, bus, io as vio, pcm, tts
 
 CONFIG = os.path.expanduser("~/.config/tekdromo/voice.json")
 
@@ -88,7 +88,7 @@ def _chunks(text):
 class VoiceService(object):
 
     def __init__(self, voice=None, device=None, path=bus.DEFAULT_PATH,
-                 latency_trim=0.0):
+                 latency_trim=0.0, brain_model=None, cooldown=180.0):
         t0 = time.time()
         # An explicit --voice wins; otherwise use whatever was chosen by ear.
         self.voice = tts.load(voice or load_choice())
@@ -105,6 +105,18 @@ class VoiceService(object):
         # a manual trim for the part it cannot see (a Bluetooth speaker's own
         # internal buffer is invisible from this side).
         self.latency = vio.sink_latency(device) + float(latency_trim)
+        # Camera/mic events. The cooldown is the thing standing between an
+        # ambient face and a device that talks over your evening - and between
+        # you and an API bill, since every event that gets through costs a
+        # model call. Deliberately generous by default.
+        self.brain = agent.load(brain_model)
+        self.watching = True
+        self.cooldown = float(cooldown)
+        self.last_event = 0.0
+        self.last_spoke = 0.0
+        self.recent = []
+        self.events_seen = 0
+        self.events_acted = 0
         self.server = bus.Server(path, self.handle)
         print("voice=%s %dHz (loaded in %.2fs)  mouth lag %.0fms  socket=%s"
               % (self.voice.name, self.voice.rate, self.load_time,
@@ -133,6 +145,18 @@ class VoiceService(object):
             save_choice(v.name)
             print("voice set to %s (saved to %s)" % (v.name, CONFIG), flush=True)
             return {"ok": True, "voice": v.name, "rate": v.rate}
+        if cmd == "event":
+            return self.on_event(msg.get("event") or {})
+        if cmd == "watch":
+            if "on" in msg:
+                self.watching = bool(msg["on"])
+            if "cooldown" in msg:
+                self.cooldown = max(0.0, float(msg["cooldown"]))
+            return {"ok": True, "watching": self.watching,
+                    "cooldown": self.cooldown, "brain": self.brain.name,
+                    "seen": self.events_seen, "acted": self.events_acted,
+                    "next_in": max(0.0, round(
+                        self.cooldown - (time.time() - self.last_event), 1))}
         if cmd == "latency":
             # Lets the lag be trimmed by ear without a restart.
             if "seconds" in msg:
@@ -146,6 +170,60 @@ class VoiceService(object):
         if cmd == "ping":
             return {"ok": True}
         return {"ok": False, "error": "unknown command %r" % cmd}
+
+    # -- events ------------------------------------------------------------
+    def on_event(self, ev):
+        """A camera (later, a microphone) noticed something.
+
+        Returns immediately. Deciding costs ~13 s of model call and speaking
+        costs however long the sentence is, so neither may happen on the
+        caller's connection - the display sends these, and the display must
+        never wait for anything.
+        """
+        self.events_seen += 1
+        if not self.watching:
+            return {"ok": True, "acted": False, "reason": "watching is off"}
+        now = time.time()
+        if now - self.last_event < self.cooldown:
+            return {"ok": True, "acted": False, "reason": "cooldown",
+                    "next_in": round(self.cooldown - (now - self.last_event), 1)}
+        # Departures are recorded but never spoken about: announcing that
+        # someone has left, to an empty room, is talking to nobody.
+        if ev.get("kind") == "departure":
+            return {"ok": True, "acted": False, "reason": "departure"}
+        self.last_event = now
+        t = threading.Thread(target=self._consider, args=(ev,))
+        t.daemon = True
+        t.start()
+        return {"ok": True, "acted": True, "considering": True}
+
+    def _consider(self, ev):
+        """Ask the Brain, and speak only if it decided to."""
+        ev.setdefault("when", time.strftime("%A %H:%M"))
+        ev["last_spoken_ago"] = (time.time() - self.last_spoke
+                                 if self.last_spoke else None)
+        ev["recent"] = list(self.recent)
+        t0 = time.time()
+        try:
+            words = self.brain.respond(ev)
+        except Exception:
+            traceback.print_exc()
+            words = None
+        took = time.time() - t0
+        if not words:
+            print("event %s: stayed quiet (%.1fs)" % (ev.get("kind"), took),
+                  flush=True)
+            return
+        self.events_acted += 1
+        self.recent.append(words)
+        del self.recent[:-5]
+        self.last_spoke = time.time()
+        print("event %s: saying %r (decided in %.1fs)"
+              % (ev.get("kind"), words[:60], took), flush=True)
+        try:
+            self._say(words)
+        except Exception:
+            traceback.print_exc()
 
     def _voice(self, name):
         """A loaded Voice by name, cached."""
@@ -279,6 +357,7 @@ class VoiceService(object):
                 self.server.publish({"speaking": False})
 
             self.spoken += 1
+            self.last_spoke = time.time()
             dur = state["audio"]
             print("said %.1fs in %.1fs (%.2fx, %d chunks) [%s] %s"
                   % (dur, state["synth"], state["synth"] / max(dur, 1e-6),
@@ -305,6 +384,12 @@ def main(argv=None):
                     help="piper|pico|flite|espeak (default: best available)")
     ap.add_argument("--device", default=None, help="PulseAudio sink name")
     ap.add_argument("--socket", default=bus.DEFAULT_PATH)
+    ap.add_argument("--brain-model", default=None,
+                    help="model for camera/mic decisions. Faster is better "
+                         "here: a greeting that lands 13s after someone walks "
+                         "in reads as a malfunction.")
+    ap.add_argument("--cooldown", type=float, default=180.0,
+                    help="minimum seconds between acting on camera events")
     ap.add_argument("--latency-trim", type=float, default=0.0,
                     help="extra seconds to delay the MOUTH behind the audio. "
                          "PulseAudio cannot see a Bluetooth speaker's own "
@@ -326,7 +411,8 @@ def main(argv=None):
             sink.write(f)
         sink.close()
         return 0
-    VoiceService(a.voice, a.device, a.socket, a.latency_trim).run()
+    VoiceService(a.voice, a.device, a.socket, a.latency_trim,
+                 a.brain_model, a.cooldown).run()
     return 0
 
 

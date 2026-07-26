@@ -56,6 +56,7 @@ class Tracker:
         self.frames = 0
         self.detections = 0
         self.last_frame = None
+        self.last_faces = 0
 
     # -- lifecycle ---------------------------------------------------------
     def start(self):
@@ -118,6 +119,12 @@ class Tracker:
                            interpolation=cv2.INTER_AREA)
         g = cv2.equalizeHist(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY))
         faces = self.cascade.detectMultiScale(g, 1.15, 4, minSize=(36, 36))
+        # Keep the frame whether or not a face was found. It used to be stored
+        # only on a hit, which meant "look at the camera" had nothing to look
+        # at in an empty room - and an empty room is a perfectly good answer.
+        with self._lock:
+            self.last_frame = frame
+            self.last_faces = len(faces)
         if len(faces) == 0:
             return
         # biggest face wins - the nearest person is the one being addressed
@@ -131,9 +138,28 @@ class Tracker:
         with self._lock:
             self._raw = (nx, ny, fw / small.shape[1], now)
             self.detections += 1
-            self.last_frame = frame
 
     # -- consumer ----------------------------------------------------------
+    def snapshot(self, path):
+        """Write the most recent decoded frame to disk, for the Brain to look at.
+
+        Only detection ticks decode a frame (grab/retrieve are split to keep the
+        renderer fast), so this is the newest frame that was actually looked at
+        - which is the one the event refers to.
+        """
+        with self._lock:
+            frame = self.last_frame
+        if frame is None:
+            return None
+        try:
+            d = os.path.dirname(path)
+            if d and not os.path.isdir(d):
+                os.makedirs(d)
+            cv2.imwrite(path, frame)
+            return path
+        except Exception:
+            return None
+
     def state(self, hold=1.2):
         """present/x/y/size/age. `hold` = seconds a lost face stays 'present'."""
         with self._lock:

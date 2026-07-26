@@ -28,6 +28,14 @@ import numpy as np
 
 from . import (contour, framebuffer, geometry, phosphor, rig, speech,
                starfield, voice_link)
+from .voice import bus
+
+# How long a presence change must persist before it counts as an event. Below
+# this, a detector glitch becomes an arrival.
+WATCH_STABLE = 2.0
+SNAPSHOT = os.path.join(os.path.expanduser("~/.cache/tekdromo"), "seen.jpg")
+# Refresh the on-disk frame this often while someone is in view.
+SNAPSHOT_EVERY = 8.0
 
 # Process start, captured at import so the startup report measures what the
 # user actually waits for - from exec to a picture - not from some later point.
@@ -126,6 +134,12 @@ class Display:
         # its own thread, so the voice service can start later, be restarted,
         # or never exist, without the display noticing.
         self.mouth = voice_link.MouthLink().start()
+        # Camera-event state. Transitions are debounced here; the policy of
+        # whether to act on them lives in the voice service.
+        self._watch_state = False
+        self._pending_state = False
+        self._pending_since = None
+        self._event_q = []
         return self
 
     # -- watchdog ---------------------------------------------------------
@@ -155,7 +169,72 @@ class Display:
                               blend=0.45)
             self._seen = st["present"]
         w = 1.0 if st["present"] else 0.0         # presence weight
+        self._watch(st, t)
         return rx - 0.10 * gy * w, idle * (1.0 - 0.75 * w) + hy * w
+
+    # -- camera events -----------------------------------------------------
+    def _watch(self, st, t):
+        """Notice arrivals and departures and hand them to the voice service.
+
+        Runs inside the frame loop, so it does nothing but compare two numbers
+        and drop a note on a queue - the snapshot and the socket write happen
+        on _event_worker. Anything that can block does not belong here.
+
+        Only debouncing lives here: an arrival has to persist before it counts,
+        or a detector glitch becomes an event. The COOLDOWN and the on/off
+        switch live in the voice service instead, so `tek watch off` works
+        without restarting the display.
+        """
+        present = bool(st["present"])
+        if present != self._pending_state:
+            self._pending_state = present
+            self._pending_since = t
+            return
+        if self._pending_since is None or present == self._watch_state:
+            return
+        if t - self._pending_since < WATCH_STABLE:
+            return                       # not settled yet
+        self._watch_state = present
+        self._pending_since = None
+        self._event_q.append({
+            "kind": "arrival" if present else "departure",
+            "what": ("someone came into view" if present
+                     else "whoever was there has gone"),
+            "faces": 1 if present else 0,
+        })
+
+    def _event_worker(self):
+        """Snapshot and send. Off the render loop entirely.
+
+        Also keeps a recent frame on disk whenever anyone is in view, so
+        `tek look` has something to look at. The voice service does not own the
+        camera - only this process can - and a manual "look now" that finds a
+        stale or missing image is worse than useless.
+        """
+        last_shot = 0.0
+        while self.running:
+            if not self._event_q:
+                now = time.time()
+                # Unconditionally, not only when a face is present: `tek
+                # look` should work in an empty room too.
+                if self.cam is not None and now - last_shot > SNAPSHOT_EVERY:
+                    self.cam.snapshot(SNAPSHOT)
+                    last_shot = now
+                time.sleep(0.25)
+                continue
+            ev = self._event_q.pop(0)
+            self._event_q[:] = []            # only the newest matters
+            try:
+                if self.cam is not None and ev["kind"] == "arrival":
+                    shot = self.cam.snapshot(SNAPSHOT)
+                    if shot:
+                        ev["image"] = shot
+                ev["when"] = time.strftime("%A %H:%M")
+                c = bus.Client(bus.DEFAULT_PATH, timeout=10)
+                c.send({"cmd": "event", "event": ev})
+                c.close()
+            except Exception:
+                pass                         # voice service down: not our problem
 
     def _wait_for_camera(self, period=2.0):
         """Attach the tracker whenever a camera turns up - now, or in an hour.
@@ -219,6 +298,7 @@ class Display:
     def run(self):
         threading.Thread(target=self._watchdog, daemon=True).start()
         threading.Thread(target=self._background_init, daemon=True).start()
+        threading.Thread(target=self._event_worker, daemon=True).start()
         if not self.a.no_camera:
             threading.Thread(target=self._wait_for_camera, daemon=True).start()
         t0 = prev = tick = time.time()

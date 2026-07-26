@@ -11,6 +11,7 @@ The CLI has no synthesis and no fallback logic of its own: two places deciding
 "how do we speak" is exactly how they drift apart.
 """
 import argparse
+import os
 import socket
 import sys
 
@@ -89,6 +90,17 @@ def main(argv=None):
 
     p = sub.add_parser("voice", help="set the default voice, permanently")
     p.add_argument("name", help="piper|pico|flite|espeak")
+
+    p = sub.add_parser("watch",
+                       help="camera-triggered speech: on, off, or status")
+    p.add_argument("state", nargs="?", choices=["on", "off"], default=None)
+    p.add_argument("--cooldown", type=float, default=None,
+                   help="minimum seconds between acting on events")
+
+    p = sub.add_parser("look",
+                       help="look at the camera NOW and decide whether to speak")
+    p.add_argument("--force", action="store_true",
+                   help="ignore the cooldown")
 
     sub.add_parser("status", help="service state")
     sub.add_parser("voices", help="which voices work here")
@@ -169,6 +181,44 @@ def main(argv=None):
         sys.stderr.write("failed: %s\n" % (r or {}).get("error", "no reply"))
         c.close()
         return 1
+
+    if a.cmd == "watch":
+        c = _client(a.socket, timeout=15.0)
+        if c is None:
+            return 1
+        msg = {"cmd": "watch"}
+        if a.state:
+            msg["on"] = (a.state == "on")
+        if a.cooldown is not None:
+            msg["cooldown"] = a.cooldown
+        r = c.request(msg) or {}
+        c.close()
+        print("  watching   %s" % r.get("watching"))
+        print("  cooldown   %.0fs" % (r.get("cooldown") or 0))
+        print("  brain      %s" % r.get("brain"))
+        print("  events     %s seen, %s acted on" % (r.get("seen"), r.get("acted")))
+        if r.get("next_in"):
+            print("  next event accepted in %.0fs" % r["next_in"])
+        return 0
+
+    if a.cmd == "look":
+        # A manual trigger, so the whole perception path can be exercised
+        # without waiting for someone to walk past.
+        c = _client(a.socket, timeout=180.0)
+        if c is None:
+            return 1
+        if a.force:
+            c.request({"cmd": "watch", "cooldown": 0})
+        r = c.request({"cmd": "event", "event": {
+            "kind": "manual", "faces": 1,
+            "what": "you were asked to look at the camera right now",
+            "image": os.path.expanduser("~/.cache/tekdromo/seen.jpg")}}) or {}
+        c.close()
+        if r.get("acted"):
+            print("  looking... (it will speak only if it decides to)")
+        else:
+            print("  did not look: %s" % r.get("reason"))
+        return 0
 
     if a.cmd == "status":
         c = _client(a.socket, timeout=5.0)

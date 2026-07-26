@@ -23,7 +23,8 @@ approach does not exist on this box.</sub>
 6. [Testing](#6-testing)
 7. [Services](#7-services)
 8. [Measured results](#8-measured-results)
-9. [What is next](#9-what-is-next)
+9. [The camera can prompt me](#9-the-camera-can-prompt-me)
+10. [What is next](#10-what-is-next)
 
 ---
 
@@ -520,11 +521,71 @@ Things that were measured and did **not** help, recorded so nobody repeats them:
 
 ---
 
-## 9. What is next
+## 9. The camera can prompt me
 
-* **The conversation loop** — wake word → transcribe → `claude -p` → speak.
-  Streaming matters: with `--output-format stream-json` speech can start on the
-  first sentence instead of after the whole reply.
+The camera does not just steer the head — it can **start a conversation**.
+
+```
+camera sees something  ->  debounce  ->  cooldown  ->  a model looks at the
+                                                       frame and decides
+                                                            |
+                                    speaks  <---------------+---> stays silent
+```
+
+Silence is a first-class outcome, not a failure. A face that comments on every
+arrival is unbearable within a day.
+
+```bash
+tek watch                 # is it on, what is the cooldown, how many events
+tek watch off             # stop it acting on camera events
+tek watch --cooldown 600  # be less talkative
+tek look                  # look right now and decide (manual trigger)
+tek look --force          # ignore the cooldown
+```
+
+### Who it thinks people are
+
+Identity comes from **plain English**, not a face-recognition model. Describe
+the household in `~/.config/tekdromo/people.md` and that text is handed to the
+model along with the picture. No training step, no embeddings, no enrolment —
+and someone undescribed is simply not greeted by name.
+
+### Three gates before anything costs money
+
+Every event that gets through is a model call, so:
+
+| Gate | Where | Why |
+|---|---|---|
+| **Debounce** (2 s) | display | a detector glitch is not an arrival |
+| **Cooldown** (180 s) | voice service | so `tek watch off` works without restarting the display |
+| **Departures ignored** | voice service | announcing that someone left, to an empty room, is talking to nobody |
+
+### Things that were wrong at first
+
+* **`claude` is not on systemd's PATH.** It lives in `~/.local/bin`, so the
+  subprocess never started. The brain caught the `OSError` and returned "no
+  comment", which meant a **crash was indistinguishable from a thoughtful
+  silence** — the log said `stayed quiet (0.0s)` and the `0.0` was the only
+  clue. Failures are now logged loudly and the CLI path is absolute.
+* **The brain ran in the project directory**, so it picked up `CLAUDE.md`,
+  learned it had a voice, and started trying to run commands it had no
+  permission for — turning a 10 s judgement call into 59 s of nothing. It now
+  runs in a neutral directory with `--allowed-tools Read`.
+* **`--allowed-tools` before the prompt** makes the CLI report the prompt as
+  missing. Order matters.
+
+Decision latency is **~10 s**. That is why the trigger fires on arrival rather
+than waiting for someone to settle, and why `--brain-model` exists.
+
+<sub>[↑ Contents](#contents)</sub>
+
+---
+
+## 10. What is next
+
+* **The conversation loop** — wake word → transcribe → the same Brain → speak.
+  The camera path already proves the shape; a microphone is just another event
+  source feeding the same pipeline.
 * **A microphone.** Everything above the mic is built and tested; far-field
   pickup in a real room is the open question, and it matters more than model
   choice.

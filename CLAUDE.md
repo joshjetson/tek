@@ -33,6 +33,16 @@ long-running work so the shell carries on.
 Long replies wait ~5.5 s before the first word (building a synthesis head
 start); short ones are effectively immediate. That is by design, not a fault.
 
+## The camera can prompt you
+
+`tek watch` / `tek look`. A camera event runs a model call that looks at a frame
+and returns either words or silence. Silence is the right answer most of the
+time — see [README §9](README.md#9-the-camera-can-prompt-me).
+
+If you change the brain: it must run in a NEUTRAL cwd. Running it in this
+project puts CLAUDE.md in scope, so it learns it has a voice and may speak for
+itself as well as returning words to speak.
+
 ## Environment traps
 
 * **`OPENBLAS_CORETYPE=ARMV8` is mandatory.** Without it `import numpy` and
