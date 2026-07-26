@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 """Prove the CUDA build actually accelerates work, not just that it links."""
 import time
 import cv2

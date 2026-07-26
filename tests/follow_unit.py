@@ -1,6 +1,9 @@
 """Unit-test the follower against synthetic input, before trusting a live run.
 The windup bug only showed up on real data; this makes it reproducible."""
 import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import os
 os.environ.setdefault("OPENBLAS_CORETYPE", "ARMV8")
 import tekcam
 
