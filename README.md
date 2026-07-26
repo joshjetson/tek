@@ -485,6 +485,38 @@ startup gap, per-frame exceptions, systemd's start limit, the console blanker, a
 wedged model, blanking on exit, and a camera that has not enumerated yet. See
 `TEKDROMO.md` §5.
 
+### Keeping the Bluetooth speaker awake
+
+There is a way the audio dies that is not on the Nano at all: **the speaker has
+its own idle timer** and powers itself off when what it receives is digital
+silence. Unloading `module-suspend-on-idle` keeps PulseAudio's *stream* open,
+which is necessary but not sufficient — something has to actually be played.
+
+```bash
+tek keepalive                 # interval, tone, how many sent, idle time
+tek keepalive --every 300     # less often
+tek keepalive --every 0       # disable
+tek keepalive --now           # send one immediately
+```
+
+After 120 s of genuine silence the voice service plays a **0.6 s tone at 40 Hz**,
+faded in and out. Speech resets the timer and it is skipped while speaking, so a
+talkative evening sends none at all.
+
+Three deliberate choices, because the obvious answer is wrong:
+
+* **40 Hz, not ultrasonic.** The intuitive pick is a tone above adult hearing,
+  and it is a bad idea in a house with children — hearing extends well past
+  18 kHz at their age, so a tone the adults cannot hear could quietly irritate
+  the kids all day. 40 Hz is inaudible because a portable speaker's driver
+  physically cannot reproduce it, which does not depend on whose ears are in the
+  room.
+* **−30 dBFS, not −80.** It has to be *real signal*: a speaker that sleeps on
+  silence may well treat near-silence the same way.
+* **Faded at both ends.** A waveform starting mid-cycle is a step discontinuity,
+  and a step contains every frequency — so an inaudible 40 Hz tone would
+  announce itself with an audible click through the tweeter.
+
 <sub>[↑ Contents](#contents)</sub>
 
 ---
