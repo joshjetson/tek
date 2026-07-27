@@ -156,6 +156,7 @@ class Display:
         self.mouth = voice_link.MouthLink().start()
         self.clock = None if self.a.no_clock else hud.Clock(self.w, self.h)
         self.scope = None if self.a.no_scope else hud.Scope(self.w, self.h)
+        self.face_panel = None if self.a.no_facepanel else hud.FacePanel(self.w, self.h)
         # Camera-event state. Transitions are debounced here; the policy of
         # whether to act on them lives in the voice service.
         self._watch_state = False
@@ -391,6 +392,12 @@ class Display:
                     panels.append(self.clock.points())
                 if self.scope is not None:
                     panels.append(self.scope.points())
+                if self.face_panel is not None:
+                    # None when nobody is there, which the panel draws as a
+                    # "no signal" cross rather than an empty box.
+                    self.face_panel.update(
+                        self.cam.face_points() if self.cam is not None else None)
+                    panels.append(self.face_panel.points())
                 if panels:
                     pts = np.concatenate([pts] + panels) if len(pts) \
                         else np.concatenate(panels)
@@ -477,6 +484,8 @@ def main(argv=None):
                     help="hide the clock/date panel")
     ap.add_argument("--no-scope", action="store_true",
                     help="hide the audio waveform panel")
+    ap.add_argument("--no-facepanel", action="store_true",
+                    help="hide the camera landmark-face panel")
     ap.add_argument("--max-fps", type=float, default=30.0,
                     help="frame cap. Rendering flat-out burns power for no "
                          "visible benefit and this board has thin current "

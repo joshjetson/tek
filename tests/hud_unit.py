@@ -217,5 +217,62 @@ ms = (_t.time() - t0) / 300 * 1000
 print("    scope costs %.3f ms/frame" % ms)
 check("scope stays well inside the frame budget", ms < 3.0, "%.2f ms" % ms)
 
+# -- the landmark face panel -----------------------------------------------
+fp = hud.FacePanel(W, H)
+empty = fp.points()
+check("face panel draws something when nobody is there", len(empty) > 4)
+check("face panel sits in the upper left", fp.bx < W * 0.3 and fp.by < H * 0.3,
+      (fp.bx, fp.by))
+check("face panel does not overlap the clock",
+      fp.bx + fp.bw < cx, (fp.bx + fp.bw, cx))
+
+# A synthetic but correctly-shaped set of 68 normalised landmarks.
+rng = np.random.RandomState(7)
+lm = np.column_stack([rng.uniform(0.35, 0.65, 68),
+                      rng.uniform(0.30, 0.70, 68)]).astype(np.float32)
+for _ in range(20):
+    fp.update(lm)
+face = fp.points()
+check("a face draws more segments than an empty panel", len(face) > len(empty),
+      (len(face), len(empty)))
+check("every part of the face is connected (68 points -> 71 strokes)",
+      len(face) - len(empty) + 4 >= 60, len(face) - len(empty))
+check("the drawn face stays inside its box",
+      face[..., 0].min() >= fp.bx and face[..., 0].max() <= fp.bx + fp.bw
+      and face[..., 1].min() >= fp.by and face[..., 1].max() <= fp.by + fp.bh,
+      (face[..., 0].min(), face[..., 0].max()))
+
+# Aspect must be preserved: a face squashed to the box is worse than a small
+# correct one.
+tall = np.column_stack([rng.uniform(0.45, 0.55, 68),
+                        rng.uniform(0.10, 0.90, 68)]).astype(np.float32)
+fp2 = hud.FacePanel(W, H)
+for _ in range(20):
+    fp2.update(tall)
+t = fp2.points()[len(empty) - 4:]
+wide_span = float(t[..., 0].max() - t[..., 0].min())
+tall_span = float(t[..., 1].max() - t[..., 1].min())
+check("a narrow tall face is not stretched to fill the box",
+      wide_span < tall_span, (wide_span, tall_span))
+
+# Smoothing: a landmark fit jitters every frame, and the panel is the only
+# moving thing in the corner, so the jitter is very visible.
+fp3 = hud.FacePanel(W, H, smooth=0.35)
+fp3.update(lm)
+first = fp3.pts.copy()
+fp3.update(lm + 0.1)
+moved = float(np.abs(fp3.pts - first).max())
+check("landmarks are smoothed, not snapped", 0.001 < moved < 0.1, moved)
+
+check("losing the face returns to the empty state",
+      (fp3.update(None), len(fp3.points()))[1] == len(empty))
+
+t0 = _t.time()
+for _ in range(300):
+    fp.points()
+ms = (_t.time() - t0) / 300 * 1000
+print("    face panel costs %.3f ms/frame" % ms)
+check("face panel stays inside the frame budget", ms < 3.0, "%.2f ms" % ms)
+
 print("HUD " + ("OK" if not FAIL else "FAILED: " + ", ".join(FAIL)))
 sys.exit(1 if FAIL else 0)

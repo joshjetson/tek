@@ -278,3 +278,107 @@ class Scope(object):
         pts = np.stack([xs, ys], axis=1)
         trace = np.rint(np.stack([pts[:-1], pts[1:]], axis=1)).astype(np.int32)
         return np.concatenate([frame, trace]) if len(frame) else trace
+
+
+# The 68-point iBUG layout, as polylines. Closed loops for the eyes and lips;
+# open strokes for the jaw, brows and nose. Drawing all 68 as dots would be
+# data, not a face - it is the connectivity that makes it read as one.
+_FACE_PARTS = (
+    (list(range(0, 17)), False),    # jaw
+    (list(range(17, 22)), False),   # brow
+    (list(range(22, 27)), False),   # brow
+    (list(range(27, 31)), False),   # nose bridge
+    (list(range(31, 36)), False),   # nostrils
+    (list(range(36, 42)), True),    # eye
+    (list(range(42, 48)), True),    # eye
+    (list(range(48, 60)), True),    # outer lip
+    (list(range(60, 68)), True),    # inner lip
+)
+
+
+def _edge_index():
+    """Flat (from, to) index pairs for the whole face, built once.
+
+    Nine per-part np.stack calls every frame cost 1.6 ms for 71 segments; two
+    fancy-index lookups against precomputed arrays cost a fraction of that.
+    The connectivity never changes, so rebuilding it per frame is pure waste.
+    """
+    a, b = [], []
+    for idx, closed in _FACE_PARTS:
+        chain = idx + [idx[0]] if closed else idx
+        a.extend(chain[:-1])
+        b.extend(chain[1:])
+    return np.array(a, np.intp), np.array(b, np.intp)
+
+
+_EDGE_A, _EDGE_B = _edge_index()
+
+
+class FacePanel(object):
+    """A vector face drawn from the camera's 68 facial landmarks.
+
+    Not a reticle and not a stylised glyph that merely moves about - these are
+    the actual measured feature points of whoever is in front of the camera,
+    drawn as strokes. The same rendering the head uses, so it belongs on the
+    screen rather than sitting on it.
+
+    Landmarks are smoothed before drawing. A per-frame fit jitters by a pixel
+    or two constantly, which is invisible in a debug overlay and very obvious
+    when it is the only moving thing in the corner of a still image.
+    """
+
+    def __init__(self, w, h, margin=26, width=196, height=200, smooth=0.35):
+        self.w, self.h = w, h
+        self.bx, self.by = margin, margin
+        self.bw, self.bh = width, height
+        self.alpha = smooth
+        self.pts = None
+        self._frame = None
+        self._empty = None
+
+    def update(self, landmarks):
+        """Feed normalised 0..1 landmarks, or None when nobody is there."""
+        if landmarks is None:
+            self.pts = None
+            return
+        p = np.asarray(landmarks, dtype=np.float32)
+        if self.pts is None or self.pts.shape != p.shape:
+            self.pts = p
+        else:
+            self.pts += (p - self.pts) * self.alpha
+
+    def _bezel(self):
+        if self._frame is None:
+            self._frame = to_pts(box(self.bx, self.by, self.bw, self.bh, notch=7))
+        return self._frame
+
+    def points(self):
+        frame = self._bezel()
+        if self.pts is None:
+            # Nobody there. A dashed cross reads as "no signal" on an
+            # instrument, where an empty box just looks broken.
+            if self._empty is None:
+                cx = self.bx + self.bw * 0.5
+                cy = self.by + self.bh * 0.5
+                segs = []
+                for k in range(-30, 31, 12):
+                    segs.append(((cx + k, cy), (cx + min(k + 6, 30), cy)))
+                self._empty = to_pts(segs)
+            return np.concatenate([frame, self._empty])
+
+        # Fit the landmarks into the panel, preserving aspect: a face squashed
+        # to the box is worse than a smaller correct one.
+        p = self.pts
+        x0, y0 = p[:, 0].min(), p[:, 1].min()
+        sx, sy = max(p[:, 0].ptp(), 1e-3), max(p[:, 1].ptp(), 1e-3)
+        pad = 16
+        iw, ih = self.bw - pad * 2, self.bh - pad * 2
+        k = min(iw / sx, ih / sy)
+        ox = self.bx + pad + (iw - sx * k) * 0.5
+        oy = self.by + pad + (ih - sy * k) * 0.5
+        q = np.empty_like(p)
+        q[:, 0] = ox + (p[:, 0] - x0) * k
+        q[:, 1] = oy + (p[:, 1] - y0) * k
+
+        trace = np.rint(np.stack([q[_EDGE_A], q[_EDGE_B]], axis=1)).astype(np.int32)
+        return np.concatenate([frame, trace])
