@@ -20,18 +20,44 @@ Design notes:
     back to centre. A person stepping briefly out of frame should not make the
     head snap forward.
 """
+import glob
 import os
 import threading
 import time
+import traceback
 
 import cv2
 import numpy as np
+
+# How long without a decoded frame before the capture is torn down and the
+# device re-discovered. Long enough to ride out a hiccup, short enough that a
+# replug recovers while the person is still standing there.
+DEAD_S = 3.0
+RETRY_S = 1.0
 
 LANDMARK_MODEL = os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "models", "lbfmodel.yaml")
 
 CASCADE = "/usr/local/share/opencv4/haarcascades/haarcascade_frontalface_default.xml"
 CASCADE_FAST = "/usr/local/share/opencv4/lbpcascades/lbpcascade_frontalface_improved.xml"
+
+
+def video_devices():
+    """Every readable /dev/video* index, lowest first.
+
+    Sorted NUMERICALLY, not as strings - `sorted(glob(...))` puts video10
+    before video2, which is the sort of thing that works on every machine you
+    test it on and then does not.
+    """
+    out = []
+    for path in glob.glob("/dev/video*"):
+        try:
+            n = int(path[len("/dev/video"):])
+        except ValueError:
+            continue
+        if os.access(path, os.R_OK):
+            out.append(n)
+    return sorted(out)
 
 
 class Tracker:
@@ -41,8 +67,11 @@ class Tracker:
         s = cam.state()      # -> dict(present, x, y, size, age)
     """
 
-    def __init__(self, device=0, width=640, height=480, detect_scale=0.5,
+    def __init__(self, device=None, width=640, height=480, detect_scale=0.5,
                  interval=0.15, fast=True, mirror=True, landmarks=True):
+        # None means "find one". An explicit index is only a PREFERENCE - it is
+        # tried first and then abandoned, because a camera that is unplugged
+        # and replugged does not reliably come back on the node it left.
         self.device = device
         self.size = (width, height)
         self.detect_scale = detect_scale
@@ -55,9 +84,12 @@ class Tracker:
         self._raw = None            # newest detection (x, y, size, t)
         self._t = None
         self._run = False
-        self._err = 0
         self.frames = 0
         self.detections = 0
+        # Health, so a supervisor can tell a working tracker from a dead one.
+        self.attached = False
+        self.last_frame_at = 0.0
+        self.opens = 0
         # 68 facial landmarks, normalised to 0..1 of the frame so nothing
         # downstream needs to know the camera's resolution.
         self.landmarks = None
@@ -100,36 +132,102 @@ class Tracker:
     def stop(self):
         self._run = False
 
+    def healthy(self, within=DEAD_S * 2):
+        """Is this tracker actually delivering frames right now?"""
+        return self.attached and (time.monotonic() - self.last_frame_at) < within
+
     # -- worker ------------------------------------------------------------
+    def _open(self):
+        """A capture that genuinely delivers frames, or None.
+
+        Every readable node is tried, not just the one we were given. A USB
+        camera that is unplugged and replugged comes back wherever the kernel
+        puts it - often video1 while the old node is still held - so an index
+        captured at construction is a guess with a shelf life. The node we last
+        used is tried first, so the normal case still costs one open.
+
+        Opening is not enough to accept a device: `VideoCapture` reports
+        isOpened() for nodes that never produce a frame (some cameras expose a
+        second, metadata-only node). It has to actually grab something.
+        """
+        cands = video_devices()
+        if self.device is not None and self.device in cands:
+            cands = [self.device] + [d for d in cands if d != self.device]
+        for dev in cands:
+            cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
+            try:
+                if cap.isOpened():
+                    # MJPG is required: YUYV at 640x480x30 saturates USB 2.0
+                    cap.set(cv2.CAP_PROP_FOURCC,
+                            cv2.VideoWriter_fourcc(*"MJPG"))
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.size[0])
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.size[1])
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    # A stream can take a moment to start after open; give it
+                    # one second before writing the device off.
+                    for _ in range(10):
+                        if not self._run:
+                            break
+                        if cap.grab():
+                            self.device = dev
+                            self.opens += 1
+                            print("camera: /dev/video%d delivering (open #%d)"
+                                  % (dev, self.opens), flush=True)
+                            return cap
+                        time.sleep(0.1)
+            except Exception:
+                traceback.print_exc()
+            cap.release()
+        return None
+
     def _loop(self):
+        """Run until stop(), surviving unplugs.
+
+        Structured so that NOTHING but stop() can end this thread. The previous
+        version wrapped the entire loop in `except Exception: pass`, so one bad
+        frame - or an exception raised while reopening a device that had just
+        vanished - killed face tracking permanently and silently, until someone
+        restarted the service. That is exactly what happened when the camera was
+        swapped: the mic on the new one worked, and the face simply stopped
+        tracking, with nothing in the log to say why.
+
+        The other half of the same bug was reopening with the index captured at
+        construction; see _open.
+        """
         cap = None
-        try:
-            cap = cv2.VideoCapture(self.device, cv2.CAP_V4L2)
-            # MJPG is required: YUYV at 640x480x30 saturates USB 2.0
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.size[0])
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.size[1])
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            last = 0.0
-            while self._run:
+        last = 0.0
+        last_ok = time.monotonic()
+        while self._run:
+            try:
+                if cap is None:
+                    cap = self._open()
+                    if cap is None:
+                        self.attached = False
+                        time.sleep(RETRY_S)
+                        continue
+                    self.attached = True
+                    last_ok = time.monotonic()
+                    self.last_frame_at = last_ok
+                    last = 0.0
+
                 # grab() pulls a frame off the queue WITHOUT decoding it;
                 # retrieve() is what costs the JPEG decode. Decoding every
                 # frame just to discard it halved the display's framerate
                 # (42 -> 21 fps), so only decode on a detection tick.
                 if not cap.grab():
-                    self._err += 1
+                    # A vanished node fails instantly, so this would spin.
                     time.sleep(0.2)
-                    if self._err > 40:            # camera unplugged: reopen
+                    if time.monotonic() - last_ok > DEAD_S:
+                        print("camera: no frames for %.0fs on /dev/video%s - "
+                              "re-discovering" % (DEAD_S, self.device),
+                              flush=True)
                         cap.release()
-                        time.sleep(1.0)
-                        cap = cv2.VideoCapture(self.device, cv2.CAP_V4L2)
-                        cap.set(cv2.CAP_PROP_FOURCC,
-                                cv2.VideoWriter_fourcc(*"MJPG"))
-                        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.size[0])
-                        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.size[1])
-                        self._err = 0
+                        cap = None
+                        self.attached = False
                     continue
-                self._err = 0
+
+                last_ok = time.monotonic()
+                self.last_frame_at = last_ok
                 self.frames += 1
                 now = time.time()
                 if now - last < self.interval:
@@ -139,11 +237,21 @@ class Tracker:
                 ok, frame = cap.retrieve()
                 if ok:
                     self._detect(frame, now)
-        except Exception:
-            pass
-        finally:
-            if cap is not None:
-                cap.release()
+            except Exception:
+                # Log it and rebuild, but never leave the loop. A tracker that
+                # dies quietly is worse than one that is noisily wrong.
+                traceback.print_exc()
+                try:
+                    if cap is not None:
+                        cap.release()
+                except Exception:
+                    pass
+                cap = None
+                self.attached = False
+                time.sleep(RETRY_S)
+        if cap is not None:
+            cap.release()
+        self.attached = False
 
     def _detect(self, frame, now):
         h, w = frame.shape[:2]

@@ -547,11 +547,18 @@ for t in tests/*.py; do python3 "$t"; done
 | `panic_unit.py` | the escape hatch, incl. a **real uinput keyboard** | root for the last part |
 | `voice_lipsync.py` | reads `/dev/fb0` while really speaking | display + voice |
 
-Two are disruptive and therefore live in `tools/`, not `tests/`:
-`tools/panic_e2e.py` fires the panic chord at the running service, and
-`tools/panic_screen.py` reads `/dev/fb0` before and after to prove the console
-really comes back rather than merely that a unit stopped. Both restart the
-display afterwards.
+Three are disruptive and therefore live in `tools/`, not `tests/`:
+
+| Tool | What it proves that the suite cannot |
+|---|---|
+| `panic_e2e.py` | the *installed service* stops the display, not just that a callback fired |
+| `panic_screen.py` | reads `/dev/fb0` before and after — the console really comes back |
+| `camera_replug.py` | deauthorizes the camera on the USB bus: a **real** unplug |
+
+`camera_replug.py --hold` is the important one. It holds the old `/dev/videoN`
+open across the unplug so the kernel cannot reuse that minor number, which
+forces the camera to re-enumerate at a different index — the exact case that
+broke when the camera was swapped. All three put things back afterwards.
 
 `voice_stt.py` is the one worth noting: with no microphone available, **Piper
 speaks the test sentences and Vosk reads them back**. The loop closes on-box.

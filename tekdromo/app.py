@@ -62,24 +62,9 @@ def _src_hash():
     return h.hexdigest()[:16]
 
 
-def _find_camera():
-    """Index of the first usable video device, or None.
-
-    NOT hardcoded to /dev/video0. A USB camera that is unplugged, reset, or
-    re-enumerated while its old node is still held comes back as video1 - which
-    happened here after a USB reset - and a hardcoded video0 then never finds
-    it again. Cheap to scan; the alternative is a camera that silently stays
-    dead until someone reboots.
-    """
-    import glob
-    for path in sorted(glob.glob("/dev/video*")):
-        try:
-            n = int(path[len("/dev/video"):])
-        except ValueError:
-            continue
-        if os.access(path, os.R_OK):
-            return n
-    return None
+# Device discovery lives in camera.video_devices(): the tracker has to
+# re-discover on every reopen anyway, so a second copy here could only drift
+# out of step with the one that matters.
 
 
 def cache_warm():
@@ -305,33 +290,52 @@ class Display:
                 pass                         # voice service down: not our problem
 
     def _wait_for_camera(self, period=2.0):
-        """Attach the tracker whenever a camera turns up - now, or in an hour.
+        """Attach a tracker, and keep one alive for as long as we run.
 
-        This used to be a single os.path.exists check during load(), which is
-        wrong in the one case that matters: at boot, USB enumeration has not
+        This began as a single os.path.exists check during load(), which is
+        wrong in the case that matters: at boot, USB enumeration has not
         finished when systemd starts us, so /dev/video0 does not exist yet and
         the head would never track again until someone restarted the service.
-        It also meant hot-plugging did nothing. Only a real reboot or a replug
-        would have shown either.
 
-        Once started, Tracker's own loop handles unplug/replug for good, so
-        this thread's job ends at the first successful attach.
+        It then became a loop that RETURNED at the first successful attach, on
+        the stated grounds that "Tracker's own loop handles unplug/replug for
+        good". That was an assertion, not a measurement, and it was wrong: the
+        tracker reopened using the device index it was built with, and its
+        worker was wrapped in a bare `except Exception: pass`, so a camera
+        swapped for a different one left the head permanently still.
+
+        So this is now a supervisor and never returns. Tracker survives an
+        unplug by itself (see camera._loop), and if it somehow does not, this
+        notices a tracker that has stopped delivering frames and replaces it.
+        Two layers, because the first one has already been believed once
+        without being true.
         """
+        from . import camera
         while self.running:
-            dev = _find_camera()
-            if dev is not None:
-                try:
-                    from . import camera
-                    follow = camera.Follower()
-                    cam = camera.Tracker(device=dev).start()
-                    # follow first: pose() reads self.cam as the guard, so the
-                    # follower must already exist when cam becomes non-None.
-                    self.follow, self.cam = follow, cam
-                    print("[%5.2fs] camera attached (/dev/video%d)"
-                          % (time.time() - T_START, dev), flush=True)
-                    return
-                except Exception:
-                    traceback.print_exc()
+            try:
+                cam = self.cam
+                if cam is not None and not (cam._t is not None
+                                            and cam._t.is_alive()):
+                    # The worker died despite everything. Say so ONCE - the
+                    # previous failure was invisible precisely because nothing
+                    # did - then drop it, so a camera that stays unplugged does
+                    # not reprint this every couple of seconds forever.
+                    print("camera: tracker thread is gone, rebuilding",
+                          flush=True)
+                    cam.stop()
+                    self.cam = cam = None
+                if cam is not None or not camera.video_devices():
+                    time.sleep(period)
+                    continue
+                follow = camera.Follower()
+                fresh = camera.Tracker().start()
+                # follow first: pose() reads self.cam as the guard, so the
+                # follower must already exist when cam becomes non-None.
+                self.follow, self.cam = follow, fresh
+                print("[%5.2fs] camera attached" % (time.time() - T_START),
+                      flush=True)
+            except Exception:
+                traceback.print_exc()
             time.sleep(period)
 
     def _background_init(self):

@@ -186,6 +186,33 @@ Seven failure modes, each handled:
    only a real reboot or a replug would have shown it, so `tests/boot_camera.py`
    fakes the device instead.
 
+   **The fix was half a fix, and said so in a docstring.** `_wait_for_camera`
+   returned at the first successful attach, on the written grounds that "once
+   started, Tracker's own loop handles unplug/replug for good". It did not.
+   Swapping the camera for a new one stopped face tracking permanently, and
+   there were three reasons, of which the device index was the least
+   interesting:
+
+   * `Tracker._loop` wrapped its entire body in `except Exception: pass`, so
+     one exception — including one raised while reopening a device that had
+     just vanished — ended the thread silently and forever;
+   * the reopen used `self.device`, the index captured at construction;
+   * `VideoCapture.isOpened()` was treated as proof a device works, when some
+     nodes open and never deliver a frame.
+
+   Now: the tracker re-discovers on every open and accepts a node only once it
+   has actually grabbed a frame; nothing but `stop()` can end the worker; and
+   `_wait_for_camera` is a permanent supervisor that replaces a dead tracker.
+   Two layers, because the single-layer version was believed once already
+   without being true.
+
+   Verified by really unplugging it — `tools/camera_replug.py` deauthorizes the
+   device on the USB bus. With `--hold` the old node is kept open so the camera
+   is forced onto a different index, reproducing the original failure exactly.
+   Recovery measured at 4.9 s, and the log shows the path:
+   `no frames for 3s on /dev/video0 - re-discovering` →
+   `/dev/video1 delivering (open #3)`.
+
 8. **No way out** — the one that actually bit a human. Every mode above is
    about keeping the display *alive*; none of them asked what happens when you
    need it to stop. The display writes to `/dev/fb0` without owning a VT, so
