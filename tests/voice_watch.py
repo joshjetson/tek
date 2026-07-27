@@ -79,6 +79,8 @@ check("brain runs in a neutral cwd, not the project",
       b.cwd)
 check("brain uses an absolute path to the CLI",
       b.exe.startswith("/") or b.exe == "claude", b.exe)
+# Latency matters more than depth for "look and decide whether to greet".
+check("brain defaults to a fast model", agent.DEFAULT_BRAIN_MODEL == "haiku")
 
 # -- the gate --------------------------------------------------------------
 sock = os.path.join(tempfile.mkdtemp(prefix="tekwatch"), "v.sock")

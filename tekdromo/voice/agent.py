@@ -30,6 +30,11 @@ BRAIN_CWD = os.path.expanduser("~/.cache/tekdromo/brain")
 
 SILENCE = "SILENCE"
 
+# Speed matters more than depth for "look at a photo and decide whether to
+# say hello". A greeting that lands ten seconds after someone walks in reads
+# as a malfunction.
+DEFAULT_BRAIN_MODEL = "haiku"
+
 # Deliberately heavy on restraint. The failure mode of an always-on camera with
 # a voice is not "it missed something", it is "it will not shut up" - so the
 # instruction has to make silence the comfortable default rather than a
@@ -193,9 +198,18 @@ class ClaudeBrain(Brain):
         # "Input must be provided either through stdin or as a prompt
         # argument". Read is the only tool it needs; withholding the rest keeps
         # a judgement call from becoming an agent loop.
-        cmd = [self.exe, "-p", self.build_prompt(event), "--allowed-tools", "Read"]
-        if self.model:
-            cmd += ["--model", self.model]
+        # Everything the CLI does that this does not need is switched off.
+        # Measured on this board, for a prompt whose whole answer is "OK":
+        #   default                        8.88 s
+        #   + haiku                        7.06 s
+        #   + no session persistence       6.70 s
+        #   + no slash commands            6.33 s
+        # The CLI itself starts in 0.42 s, so the rest is session setup and the
+        # model call - this is the floor without an API key.
+        cmd = [self.exe, "-p", self.build_prompt(event),
+               "--allowed-tools", "Read",
+               "--no-session-persistence", "--disable-slash-commands"]
+        cmd += ["--model", self.model or DEFAULT_BRAIN_MODEL]
         try:
             p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                  stderr=subprocess.PIPE, cwd=self.cwd)

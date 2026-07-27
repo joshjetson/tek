@@ -81,11 +81,35 @@ def save_choice(name):
 # synthesise while chunk 1 bought only ~4.5 s of audio, and playback caught up:
 # three silences of 1.3-1.7 s in a 72 s reply.
 _SENT = re.compile(r'(?<=[.!?])\s+')
-CHUNK_RAMP = [90, 140, 200, 260, 320]
+# Each chunk at most ~1.3x the previous. That ratio is not arbitrary:
+# synthesis runs at ~0.75x real-time, so while chunk k+1 is being made, chunk k
+# is being played, and the producer stays ahead as long as
+# 0.75 * a(k+1) <= a(k) - i.e. a(k+1) <= 1.33 * a(k).
+# The FIRST entry sets how long you wait for the first word, so it is kept
+# small; later ones grow because bigger units give Piper better prosody and
+# by then the producer is comfortably ahead.
+CHUNK_RAMP = [55, 75, 100, 135, 180, 240, 300]
+# Max growth from one chunk to the next, from the 0.75x synthesis rate:
+# 0.75 * a(k+1) <= a(k) would allow 1.33, but the rate is NOT constant: it was
+# measured between 0.73x and 0.98x depending on what else the board is doing,
+# and at 0.98x the safe growth is barely 1.0. 1.15 holds up under contention;
+# 1.30 put two gaps in a long sentence.
+GROWTH = 1.15
+# Largest atom. Small enough that the packer can hit any limit closely.
+ATOM = 45
 # Never start speaking on less than this much buffered audio. With the ramp
 # above this is what actually guarantees the producer stays ahead for the rest
 # of the reply, at the cost of ~1 s more before the first word.
-MIN_LEAD_S = 5.0
+# Only enough to cover the first chunk boundary. It was 5 seconds, which for a
+# reply shorter than about six seconds meant waiting for essentially the whole
+# thing: a three-sentence answer took 6.7s to say its first word while total
+# synthesis was 6.3s.
+#
+# A big lead is not what prevents starvation - the RATIO is. Synthesis at 0.75x
+# real-time produces faster than playback consumes, so once started, playback
+# cannot catch up; the only risk is the first boundary, before any lead has
+# accumulated, and the chunk ramp above handles that.
+MIN_LEAD_S = 1.5
 
 # Keeping the Bluetooth speaker awake.
 #
@@ -111,16 +135,60 @@ KEEPALIVE_SECS = 0.25         # brief enough not to read as a "sound"
 KEEPALIVE_EVERY = 120.0       # only if nothing else has been played
 
 
+_CLAUSE_SPLIT = re.compile(r'(?<=[,;:])\s+')
+
+
+def _atoms(text):
+    """Break text into the smallest pieces worth speaking together.
+
+    Sentences first, then clauses, then words if a clause is still huge. Small
+    atoms are what let the packer below honour a size limit exactly; handing it
+    an 81-character piece when the limit is 45 means the limit is ignored, and
+    that is how a 35-character chunk ended up followed by an 81-character one.
+    """
+    out = []
+    for sent in _SENT.split((text or "").strip()):
+        sent = sent.strip()
+        if not sent:
+            continue
+        for clause in _CLAUSE_SPLIT.split(sent):
+            clause = clause.strip()
+            if not clause:
+                continue
+            while len(clause) > ATOM:
+                cut = clause.rfind(" ", 0, ATOM)
+                if cut <= 0:
+                    break
+                out.append(clause[:cut])
+                clause = clause[cut + 1:]
+            if clause:
+                out.append(clause)
+    return out
+
+
 def _chunks(text):
-    sentences = [x.strip() for x in _SENT.split((text or "").strip()) if x.strip()]
+    """Pack atoms into chunks that grow slowly enough to never starve playback.
+
+    Two constraints, tighter wins. CHUNK_RAMP is the absolute size. GROWTH is
+    what actually prevents gaps: synthesis at ~0.75x real-time means chunk k+1
+    may be at most ~1.33x chunk k, or playback of chunk k ends before chunk k+1
+    is ready. Ignoring the ratio put three one-second holes inside a single
+    spoken sentence.
+    """
     out, buf = [], ""
-    for sent in sentences:
-        limit = CHUNK_RAMP[min(len(out), len(CHUNK_RAMP) - 1)]
-        if buf and len(buf) + len(sent) + 1 > limit:
+
+    def limit():
+        ramp = CHUNK_RAMP[min(len(out), len(CHUNK_RAMP) - 1)]
+        if not out:
+            return ramp
+        return max(ATOM, min(ramp, int(len(out[-1]) * GROWTH)))
+
+    for a in _atoms(text):
+        if buf and len(buf) + len(a) + 1 > limit():
             out.append(buf)
-            buf = sent
+            buf = a
         else:
-            buf = (buf + " " + sent).strip()
+            buf = (buf + " " + a).strip()
     if buf:
         out.append(buf)
     return out

@@ -103,5 +103,50 @@ if os.path.exists(cfg_path):
 else:
     print("  (piper model absent - skipping phonemiser checks)")
 
+# -- chunking for streaming speech ----------------------------------------
+# These constants set how long you wait for the first word and whether the
+# speech has holes in it. Both were found by measurement and both regressed
+# once already, so they are pinned.
+from tekdromo.voice import service
+
+check("the first chunk is small (it sets time-to-first-word)",
+      service.CHUNK_RAMP[0] <= 60, service.CHUNK_RAMP[0])
+check("chunks grow slowly enough for the synthesis rate",
+      service.GROWTH <= 1.20, service.GROWTH)
+check("the head start is short", service.MIN_LEAD_S <= 2.0, service.MIN_LEAD_S)
+
+for name, txt in (
+        ("short", "Sure, done."),
+        ("sentences", "One. Two three four. Five six seven eight nine ten."),
+        ("one long sentence", "This is a long answer, without any sentence "
+         "break at all, of the kind that used to be a single chunk so that "
+         "nothing could be spoken until every last word of it had been "
+         "synthesised first."),
+        ("no punctuation", "words " * 60)):
+    ch = service._chunks(txt)
+    sizes = [len(c) for c in ch]
+    check("%s: produces chunks" % name, len(ch) >= 1, sizes)
+    check("%s: first chunk is small" % name,
+          sizes[0] <= service.CHUNK_RAMP[0] + 5, sizes)
+    # A chunk much bigger than the one before it starves playback: the audio
+    # for chunk k runs out before chunk k+1 has finished synthesising.
+    #
+    # The ratio alone is too strict at small sizes. A chunk can never be
+    # smaller than one atom, so a short opening clause followed by a longer
+    # atom - 22 characters then 34 - breaks the ratio and cannot be avoided.
+    # In absolute terms that is about 0.3 s of extra audio, which no amount of
+    # lead is short of. So a jump is only a problem if it is BOTH out of ratio
+    # AND large.
+    bad = [(sizes[i], sizes[i + 1]) for i in range(len(sizes) - 1)
+           if sizes[i + 1] > sizes[i] * (service.GROWTH + 0.05)
+           and sizes[i + 1] - sizes[i] > 25]
+    check("%s: no chunk badly outgrows the one before it" % name, not bad,
+          "%s jumps %s" % (sizes, bad))
+    check("%s: nothing is lost" % name,
+          len(" ".join(ch).split()) == len(txt.split()),
+          (len(" ".join(ch).split()), len(txt.split())))
+
+check("empty text yields no chunks", service._chunks("") == [])
+
 print("VOICE PCM " + ("OK" if not FAIL else "FAILED: " + ", ".join(FAIL)))
 sys.exit(1 if FAIL else 0)
