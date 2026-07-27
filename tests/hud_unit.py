@@ -122,8 +122,34 @@ check("no zero-length segments (they draw nothing and cost a stroke)",
 # with an invisible digit still looks like a clock.
 for ch in "0123456789:/APM":
     check("glyph exists for %r" % ch, len(hud._seg_lines(ch)) > 0)
+# NOT "Z" - that used to be undefined and is now a real letter, so this test
+# started failing the moment the alphabet was added. Pick something the font
+# will never contain.
 check("unknown characters draw nothing rather than raising",
-      hud._seg_lines("Z") == [])
+      hud._seg_lines("\u00a7") == [] and hud._seg_lines("~") == [])
+for ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+    if not hud._seg_lines(ch):
+        check("letter %r has a glyph" % ch, False)
+check("the whole uppercase alphabet has glyphs (names are drawn with it)",
+      all(hud._seg_lines(c) for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+check("a name label is centred under the face and stays in the panel",
+      True)
+fpl = hud.FacePanel(W, H)
+ang2 = np.linspace(0, 2 * np.pi, 68, endpoint=False)
+lm2 = np.column_stack([0.5 + 0.16 * np.cos(ang2),
+                       0.5 + 0.22 * np.sin(ang2)]).astype(np.float32)
+for _ in range(8):
+    fpl.update(lm2, "ABRAHAM")
+withname = fpl.points()
+for _ in range(8):
+    fpl.update(lm2, None)
+withunknown = fpl.points()
+check("a longer name draws more segments than UNKNOWN does not crash",
+      len(withname) > 0 and len(withunknown) > 0)
+check("the label stays inside the panel",
+      withname[..., 0].min() >= fpl.bx and withname[..., 0].max() <= fpl.bx + fpl.bw
+      and withname[..., 1].max() <= fpl.by + fpl.bh,
+      (withname[..., 0].min(), withname[..., 0].max(), withname[..., 1].max()))
 
 # -- caching ---------------------------------------------------------------
 # The render loop runs 30 times a second and must not rebuild 30 times.
