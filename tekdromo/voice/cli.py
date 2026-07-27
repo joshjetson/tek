@@ -268,17 +268,23 @@ def main(argv=None):
             ppl = recog.people()
             if not ppl:
                 print("  nobody enrolled - every face shows as UNKNOWN")
+                return 0
+            reg = recog.registry()
+            print("  %-12s %-8s %-17s %-17s %s"
+                  % ("NAME", "SAMPLES", "ENROLLED", "LAST SEEN", "TIMES"))
             for n in ppl:
-                print("  %-14s %d samples" % (n, len(recog.samples(n))))
+                e = reg.get(n, {})
+                print("  %-12s %-8d %-17s %-17s %s"
+                      % (n, len(recog.samples(n)), e.get("enrolled", "?"),
+                         e.get("last_seen", "never"), e.get("seen", 0)))
             return 0
         if not a.name:
             sys.stderr.write("need a name\n")
             return 1
         name = a.name.strip().upper()
         if a.action == "forget":
-            import shutil
-            shutil.rmtree(os.path.join(recog.GALLERY, name), ignore_errors=True)
-            print("  forgot %s" % name)
+            recog.forget(name)
+            print("  forgot %s - photographs and record both deleted" % name)
             return 0
 
         crop = os.path.expanduser("~/.cache/tekdromo/crop.png")
@@ -308,6 +314,7 @@ def main(argv=None):
             sys.stderr.write("  no face crops appeared - is anyone in front "
                              "of the camera?\n")
             return 1
+        recog.note_enrolled(name, len(recog.samples(name)))
         print("  enrolled %s with %d samples; the display picks it up within "
               "a few seconds" % (name, got))
         return 0

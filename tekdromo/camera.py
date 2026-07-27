@@ -63,6 +63,7 @@ class Tracker:
         self.landmarks = None
         self.landmarks_at = 0.0
         self.name = None            # who the recogniser thinks this is
+        self._seen_logged = {}
         self.face_crop = None       # greyscale crop, for enrolment
         try:
             from . import recog
@@ -207,10 +208,9 @@ class Tracker:
         recogniser lives in the display, and a directory mtime is a cheaper
         channel between them than another socket.
         """
-        try:
-            from . import recog
-            m = os.path.getmtime(recog.GALLERY)
-        except OSError:
+        from . import recog
+        m = recog.signature()
+        if m is None:
             return
         if m != getattr(self, "_gallery_mtime", None):
             self._gallery_mtime = m
@@ -234,6 +234,18 @@ class Tracker:
         with self._lock:
             self.face_crop = crop
             self.name = name
+        # Log the sighting, at most once a minute per person: this writes a
+        # file, and the detector runs several times a second.
+        if name and name != "UNKNOWN":
+            last = self._seen_logged.get(name, 0.0)
+            now = time.time()
+            if now - last > 60.0:
+                self._seen_logged[name] = now
+                try:
+                    from . import recog
+                    recog.note_seen(name, now)
+                except Exception:
+                    pass
 
     def who(self):
         with self._lock:

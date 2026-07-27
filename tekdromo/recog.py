@@ -22,6 +22,10 @@ import os
 import numpy as np
 
 GALLERY = os.path.expanduser("~/.config/tekdromo/faces")
+# Kept OUTSIDE the gallery directory on purpose. Writing it inside would change
+# the gallery's mtime every time someone is seen, and the tracker watches that
+# mtime to notice enrolments - so every sighting would trigger a retrain.
+REGISTRY = os.path.expanduser("~/.config/tekdromo/people.json")
 SIZE = (120, 120)
 # Below this LBPH distance we believe it. Tuned conservatively: the cost of a
 # wrong name is much higher than the cost of "UNKNOWN".
@@ -38,6 +42,83 @@ def _norm(gray):
     import cv2
     g = cv2.resize(gray, SIZE, interpolation=cv2.INTER_AREA)
     return cv2.equalizeHist(g)
+
+
+def registry():
+    """Everyone known, with when they were enrolled and last seen.
+
+    A record rather than just a pile of photographs: who is known, since when,
+    how often they have been seen and when last. That is the difference between
+    a novelty and something you could answer a question with.
+    """
+    try:
+        import json
+        with open(REGISTRY) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def write_registry(reg):
+    import json
+    d = os.path.dirname(REGISTRY)
+    if not os.path.isdir(d):
+        os.makedirs(d)
+    tmp = REGISTRY + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(reg, f, indent=2, sort_keys=True)
+    os.replace(tmp, REGISTRY)          # atomic: never a half-written record
+
+
+def note_enrolled(name, samples):
+    import time as _t
+    reg = registry()
+    e = reg.setdefault(name, {})
+    e.setdefault("enrolled", _t.strftime("%Y-%m-%d %H:%M"))
+    e["samples"] = samples
+    write_registry(reg)
+    return e
+
+
+def note_seen(name, when=None):
+    """Record a sighting. Callers must throttle - this writes a file."""
+    import time as _t
+    if not name or name == UNKNOWN:
+        return
+    reg = registry()
+    e = reg.setdefault(name, {})
+    e["last_seen"] = _t.strftime("%Y-%m-%d %H:%M", _t.localtime(when))
+    e["seen"] = int(e.get("seen", 0)) + 1
+    write_registry(reg)
+
+
+def forget(name):
+    import shutil
+    shutil.rmtree(os.path.join(GALLERY, name), ignore_errors=True)
+    reg = registry()
+    reg.pop(name, None)
+    write_registry(reg)
+
+
+def signature():
+    """A value that changes whenever the gallery changes.
+
+    The mtime of the GALLERY directory alone is not enough: adding photographs
+    to faces/JOSH/ does not touch faces/, which only changes when a
+    subdirectory appears. Watching just the parent meant an enrolment was
+    noticed once, at whatever count existed the moment the person's directory
+    was created, and every sample added afterwards was ignored.
+    """
+    try:
+        best = os.path.getmtime(GALLERY)
+    except OSError:
+        return None
+    for name in people():
+        try:
+            best = max(best, os.path.getmtime(os.path.join(GALLERY, name)))
+        except OSError:
+            pass
+    return best
 
 
 def people():
