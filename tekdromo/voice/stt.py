@@ -37,7 +37,17 @@ DEFAULT_MODEL = os.path.join(MODEL_DIR, "vosk-model-small-en-us-0.15")
 # on - so it looked configured and could never once have fired. Multiple
 # spellings are listed because the recogniser genuinely cannot tell "tek" from
 # "tech", and insisting on one of them just loses wake-ups.
-WAKE_WORDS = ["hey tek", "hey tech", "ok tek", "ok tech"]
+# Every one of these was checked against the model's vocabulary with
+# tools/wake_probe.py - a grammar entry containing a word the model cannot
+# pronounce is SILENTLY DEAD (Vosk logs a warning and carries on), which has
+# already happened once here with "tekdromo". "hey tekk" is out of vocabulary
+# and is deliberately absent.
+#
+# The extra spellings are not different wake words, they are the same one
+# heard badly. Deliberately excluded: "hey take", "hey check" and "hi tech",
+# which the probe shows would also fire but which people actually say.
+WAKE_WORDS = ["hey tek", "hey tech", "hey tec", "hey tex", "hey deck",
+              "ok tek", "ok tech", "okay tek", "okay tech"]
 WAKE_GRAMMAR = json.dumps(WAKE_WORDS + ["[unk]"])
 
 _MODEL = None

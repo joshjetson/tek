@@ -35,12 +35,23 @@ class Segmenter(object):
     Yields int16 arrays at pcm.RATE.
     """
 
-    def __init__(self, aggressiveness=2, pre_roll=0.30, hang=0.60,
+    def __init__(self, aggressiveness=1, pre_roll=0.30, hang=0.60,
                  min_speech=0.20, max_utterance=15.0):
         import webrtcvad
-        # 0..3. 3 rejects the most non-speech but also drops quiet talkers;
-        # 2 is the usual choice for a room mic at conversational distance.
+        # 0..3, where higher rejects more non-speech AND more quiet talkers.
+        # Was 2, the usual choice for a room mic. Dropped to 1 because the
+        # complaint here is recall - "sometimes it says nothing" - and the
+        # cost of being wrong in each direction is very lopsided: a false
+        # segment is handed to a four-phrase grammar that costs about a ninth
+        # of real time and can only answer "[unk]", while a missed segment is
+        # a wake word that never happened.
         self.vad = webrtcvad.Vad(aggressiveness)
+        # Pre-roll stops the first phoneme being clipped. 0.30s, NOT more:
+        # raising it to 0.45 was tried on the theory that "hey" was being cut
+        # off, and measured against synthesised "hey tek" degraded through five
+        # levels of gain and noise it detected exactly the same 4 of 5 as 0.30
+        # did - as did 0.60. It bought no recall at all and pushed the audio
+        # handed to the recogniser from 86% to 94% of the raw stream.
         self.pre_n = max(1, int(pre_roll * 1000 / pcm.FRAME_MS))
         self.hang_n = max(1, int(hang * 1000 / pcm.FRAME_MS))
         self.min_n = max(1, int(min_speech * 1000 / pcm.FRAME_MS))

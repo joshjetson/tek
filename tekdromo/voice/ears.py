@@ -36,6 +36,8 @@ import threading
 import time
 import traceback
 
+import numpy as np
+
 from . import io as vio, pcm, stt
 
 # How long after the wake word to wait for a command, if the wake word arrived
@@ -65,6 +67,12 @@ DEAF_S = 15.0
 # the only thing that can alter the answer - so the periodic check costs one
 # `pactl list`, not a recorder opened on every candidate.
 CACHE_S = 900.0
+
+# Capture gain asserted whenever the microphone is opened. 100% is 0 dB on
+# this card - full hardware gain, no software amplification - and measured
+# ambient at that setting peaks around 0.017 with no clipped frames at all,
+# so there is headroom to spare. The device was found at 63%.
+MIC_GAIN_PCT = 100
 
 
 class Gate(vio.Source):
@@ -130,6 +138,7 @@ class Ears(object):
         self.listening_since = 0.0
         self.last_heard = None
         self.device_in_use = None
+        self.misses = []
         self._src = None
         self._gate = None
 
@@ -196,6 +205,11 @@ class Ears(object):
                     print("ears: no working microphone; retrying", flush=True)
                     time.sleep(RETRY_S)
                     continue
+                # Assert the gain before opening. The C922 was sitting at
+                # 63% / -12 dB, which throws away a factor of four in
+                # amplitude before the recogniser sees anything - and wake
+                # spotting is measurably level-sensitive at the bottom end.
+                vio.set_source_volume(device, MIC_GAIN_PCT)
                 src = vio.MicSource(device)
                 self.device_in_use = device
                 self._src = src
@@ -281,6 +295,28 @@ class Ears(object):
         # "[unk]", so ordinary conversation cannot be transcribed by it.
         spotted = self.wake.transcribe(samples)
         if not stt.heard_wake(spotted):
+            # Log the near miss. "Sometimes it says nothing" is impossible to
+            # diagnose without knowing WHICH stage dropped it - the grammar is
+            # permissive enough to wake on "hey deck" and "hey tex" when the
+            # audio is clean, so a miss is nearly always level or segmentation,
+            # not vocabulary. Recording the peak and duration alongside the
+            # result is what tells those apart.
+            #
+            # Safe to log: this grammar is physically incapable of emitting
+            # anything but its own phrases and "[unk]".
+            peak = float(np.abs(samples.astype(np.int32)).max()) / 32768.0
+            self.misses.append({"secs": round(secs, 2), "peak": round(peak, 4),
+                                "got": spotted})
+            del self.misses[:-12]
+            # Only a NEAR miss is worth a log line. A bare "[unk]" is somebody
+            # talking in the room and there are dozens an hour; printing those
+            # buries the one line that matters. "hey [unk]" is different - the
+            # head was heard and the tail was not, which is a wake attempt that
+            # got away.
+            if spotted and spotted != "[unk]":
+                print("ears: NEAR MISS %r (%.1fs, peak %.3f)%s"
+                      % (spotted, secs, peak,
+                         "  <- very quiet" if peak < 0.05 else ""), flush=True)
             return
         self.wakes += 1
 
@@ -330,4 +366,5 @@ class Ears(object):
                 "wakes": self.wakes, "commands": self.commands,
                 "opens": self.opens, "last_heard": self.last_heard,
                 "device": self.device_in_use,
+                "misses": list(self.misses[-6:]),
                 "armed": time.monotonic() < self.armed_until}

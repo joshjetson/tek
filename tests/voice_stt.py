@@ -122,6 +122,25 @@ miss = wake.transcribe(speak("the weather is quite nice today thank you"))
 check("wake grammar does NOT fire on ordinary conversation",
       not stt.heard_wake(miss), repr(miss))
 
+# Every listed spelling must actually fire. A grammar entry containing a word
+# the model has no pronunciation for is SILENTLY DEAD - Vosk warns and carries
+# on - so an unusable variant looks configured and only ever loses wake-ups.
+# That already happened once here with "tekdromo".
+for variant in stt.WAKE_WORDS:
+    got = wake.transcribe(speak(variant))
+    check("wake grammar fires on its own variant %r" % variant,
+          stt.heard_wake(got), repr(got))
+
+# The variants exist for recall, so they must not cost precision. These are
+# the near neighbours: "okay then lets go" decodes as "okay deck [unk]", which
+# is exactly why "okay deck" is NOT one of the listed spellings.
+for ordinary in ("take the bins out", "check the oven please",
+                 "high tech gadgets", "hey there how are you",
+                 "okay then lets go", "hey mum"):
+    got = wake.transcribe(speak(ordinary))
+    check("no false wake on %r" % ordinary[:22],
+          not stt.heard_wake(got), repr(got))
+
 wake_audio = speak("hey tek")
 wake_rtf = rtf(wake, wake_audio)
 print("    wake spotting: %.2fx real-time  (%.0f%% of one core, always on)"

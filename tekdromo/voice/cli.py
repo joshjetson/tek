@@ -240,6 +240,10 @@ def main(argv=None):
             print("  microphone   %s" % (r.get("device") or "?"))
             print("  mic opens    %s" % r.get("opens"))
             print("  last heard   %r" % (r.get("last_heard"),))
+            for m in (r.get("misses") or []):
+                print("  near miss    %-16r %4.1fs  peak %.3f%s"
+                      % (m.get("got"), m.get("secs", 0), m.get("peak", 0),
+                         "   <- too quiet" if m.get("peak", 1) < 0.05 else ""))
             if r.get("armed"):
                 print("  ARMED - waiting for a command right now")
         elif r.get("listening"):

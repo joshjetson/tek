@@ -106,6 +106,7 @@ def make_ears(wake_script, free_script):
     e.armed_until = 0.0
     e.utterances = e.wakes = e.commands = e.opens = 0
     e.last_heard = None
+    e.misses = []
     e._run = True
     e._t = None
     e.wake = FakeRec(wake_script)
@@ -122,6 +123,17 @@ e._utterance(DUMMY)
 check("no wake word -> nothing is reported", e.service.events == [])
 check("no wake word -> the free recogniser is never even called",
       e.free.calls == 0, e.free.calls)
+# A miss is recorded so "sometimes it says nothing" can be diagnosed at all.
+# What is kept can only ever be the grammar's own output, which is physically
+# incapable of containing anything but the wake phrases and "[unk]".
+check("a near miss is recorded for diagnosis", len(e.misses) == 1, e.misses)
+check("the miss records what the grammar returned",
+      e.misses[0]["got"] == "[unk]", e.misses)
+check("the miss records the level, to tell 'too quiet' from 'misheard'",
+      "peak" in e.misses[0] and "secs" in e.misses[0], e.misses)
+for i in range(30):
+    e._utterance(DUMMY)
+check("misses are bounded, not a leak", len(e.misses) <= 12, len(e.misses))
 
 # Wake word and command in one breath - how people actually talk.
 e = make_ears(["hey tek"], ["hey tek what time is it"])

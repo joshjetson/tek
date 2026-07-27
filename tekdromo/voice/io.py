@@ -385,6 +385,34 @@ def source_alive(name, seconds=0.6, distinct=8):
                 pass
 
 
+def set_source_volume(name, percent=100):
+    """Put a capture source at a known gain, and unmute it.
+
+    Found at 63% / -12 dB, which is a factor of four in amplitude thrown away
+    before the recogniser ever sees the audio - and the direct cause of "it
+    sometimes doesn't hear me": measured against degraded audio, wake spotting
+    holds up until the level drops to around a tenth, and a 12 dB cut is
+    two-thirds of the way there on its own.
+
+    Asserted every time the microphone is opened rather than set once by hand.
+    The mic is inside the webcam, so a replug re-creates the PulseAudio device
+    with default settings, and a gain fixed once would quietly go away the
+    next time somebody moved the camera.
+    """
+    if not name:
+        return False
+    ok = True
+    for args in (["set-source-volume", name, "%d%%" % percent],
+                 ["set-source-mute", name, "0"]):
+        try:
+            ok = subprocess.call(["pactl"] + args,
+                                 stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL) == 0 and ok
+        except Exception:
+            ok = False
+    return ok
+
+
 _SRC_CACHE = {"t": 0.0, "name": None, "cands": None}
 
 
