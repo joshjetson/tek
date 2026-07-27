@@ -201,6 +201,36 @@ for phrase in ("what time is it", "is the door locked", "how are you doing",
 check("a short phrase is never stripped to nothing",
       stt.strip_wake("hey tak") == "hey tak", stt.strip_wake("hey tak"))
 
+# "Just the wake word", when the decoder mangled it. Observed live: someone
+# said "hey tek" alone, the decoder wrote "hate tech", nothing stripped it
+# because there was no command to strip from, and it was dispatched as the
+# question - so it answered as though they had announced they dislike
+# technology.
+for phrase in ("hey tek", "hate tech", "ok tek", "hey tak", "HEY TECH.",
+               "we tank", ""):
+    check("recognises %r as the wake word alone" % phrase,
+          stt.wake_only(phrase), phrase)
+for phrase in ("what time is it", "hate technology in general",
+               "turn the lights off", "tell me a joke"):
+    check("does NOT mistake %r for a bare wake word" % phrase[:24],
+          not stt.wake_only(phrase), phrase)
+
+# The whole-string fuzzy test CANNOT separate a mangled wake word from a short
+# greeting - "we tank" scores 0.57 and "hey there" 0.75 - so it is only ever
+# consulted when strip_wake removed nothing. Pin the routing, since that is
+# what makes the ambiguity harmless.
+e = make_ears(["hey tek"], ["hey tek hello there"])
+e._utterance(DUMMY)
+check("a stripped remainder is dispatched even if it looks wake-ish",
+      [ev.get("heard") for ev in e.service.events] == ["hello there"],
+      e.service.events)
+
+e = make_ears(["hey tech"], ["hate tech"])
+e._utterance(DUMMY)
+check("a mangled BARE wake word arms instead of being asked as a question",
+      e.service.events == [] and time.monotonic() < e.armed_until,
+      e.service.events)
+
 # -- constants -------------------------------------------------------------
 check("the speak tail covers A2DP latency and some reverb",
       ears.SPEAK_TAIL >= 0.5, ears.SPEAK_TAIL)

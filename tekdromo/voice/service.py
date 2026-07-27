@@ -136,6 +136,78 @@ KEEPALIVE_EVERY = 120.0       # only if nothing else has been played
 
 
 _CLAUSE_SPLIT = re.compile(r'(?<=[,;:])\s+')
+# A sentence end, with any closing quote or bracket, followed by a space. Used
+# to find the last point in a partial reply that is safe to start speaking.
+_SENT_END = re.compile(r'[.!?][\"\')\]]?\s')
+
+
+# Shortest prefix worth speaking on its own. Deliberately small: "It's Monday."
+# is a complete answer and waiting for 45 more characters that may never come
+# would throw away the whole point of streaming. It is not smaller because a
+# two-word fragment on its own sounds clipped. Consecutive short sentences do
+# not each become a chunk - _speakable takes the LAST sentence end in the
+# buffer, so "Oh. Hello there." goes out as one piece.
+MIN_SPEAK = 12
+
+
+def _speakable(buf, limit):
+    """How much of a partly-arrived reply can be spoken now. 0 if none.
+
+    A completed sentence is the natural cut - Piper's prosody depends on
+    getting whole sentences, and cutting mid-clause is audible. Only if the
+    buffer has grown past the chunk limit without one is a word boundary used
+    instead, because at that point waiting costs more than the seam does.
+    """
+    last = None
+    for m in _SENT_END.finditer(buf):
+        if m.end() > limit:
+            break            # a whole sentence, but too big to cut here yet
+        last = m
+    if last is not None and last.end() >= MIN_SPEAK:
+        return last.end()
+    if len(buf) >= limit:
+        cut = buf.rfind(" ", 0, limit)
+        return cut if cut >= MIN_SPEAK else limit
+    return 0
+
+
+def _stream_chunks(pieces, said):
+    """Text arriving from a model -> speakable chunks, as early as possible.
+
+    The non-streaming `_chunks` needs the whole reply before it can produce
+    anything, so time-to-first-word grows with the length of the answer. That
+    is exactly the wrong trade once answers are allowed to be substantial: a
+    good long answer would be punished with a long silence in front of it.
+
+    The chunk ramp is carried ACROSS pieces rather than restarted per
+    sentence, so the same "grow slowly enough never to starve playback"
+    guarantee that `_chunks` provides still holds - see CHUNK_RAMP.
+    """
+    buf = ""
+    n, prev = 0, 0
+    for piece in pieces:
+        if not piece:
+            continue
+        buf += piece
+        said["text"] += piece
+        while True:
+            # Same two constraints as _chunks: the ramp is the absolute size,
+            # GROWTH is what actually prevents gaps. Cutting at whatever
+            # sentence end happened to arrive ignored the ratio and produced
+            # 32 characters followed by 83 - playback of the first runs out
+            # long before the second is synthesised.
+            ramp = CHUNK_RAMP[min(n, len(CHUNK_RAMP) - 1)]
+            limit = ramp if not n else max(ATOM, min(ramp, int(prev * GROWTH)))
+            cut = _speakable(buf, limit)
+            if cut <= 0:
+                break
+            out, buf = buf[:cut].strip(), buf[cut:]
+            if out:
+                n, prev = n + 1, len(out)
+                yield out
+    for tail in _chunks(buf):          # whatever is left when the model stops
+        n += 1
+        yield tail
 
 
 def _atoms(text):
@@ -430,6 +502,18 @@ class VoiceService(object):
                                  if self.last_spoke else None)
         ev["recent"] = list(self.recent)
         t0 = time.time()
+
+        # A spoken question is answered AS IT IS WRITTEN. Anything else waits
+        # for the whole reply first: a camera remark is one or two sentences,
+        # so streaming would save nothing and only add ways to go wrong.
+        if ev.get("kind") == "speech" and hasattr(self.brain, "stream"):
+            try:
+                if self._stream_reply(ev, t0):
+                    return
+            except Exception:
+                traceback.print_exc()
+            return
+
         try:
             words = self.brain.respond(ev)
         except Exception:
@@ -451,6 +535,36 @@ class VoiceService(object):
         except Exception:
             traceback.print_exc()
 
+    def _stream_reply(self, ev, t0):
+        """Speak a reply as the model writes it. True if anything was said.
+
+        The first chunk is what the whole exercise is for, so it is timed and
+        logged: it is the number a person actually experiences, and it is now
+        roughly independent of how long the answer turns out to be.
+        """
+        first = {"at": None}
+
+        def timed():
+            for piece in self.brain.stream(ev):
+                if first["at"] is None:
+                    first["at"] = time.time() - t0
+                yield piece
+
+        r = self._say(timed()) or {}
+        words = (r.get("text") or "").strip()
+        if not words:
+            print("event speech: stayed quiet (%.1fs)" % (time.time() - t0),
+                  flush=True)
+            return False
+        self.events_acted += 1
+        self.recent.append(words)
+        del self.recent[:-5]
+        self.last_spoke = time.time()
+        print("event speech: first word %.1fs, whole answer %.1fs, %d chars: %s"
+              % (first["at"] or -1, time.time() - t0, len(words), words[:60]),
+              flush=True)
+        return bool(r and r.get("ok", True))
+
     def _voice(self, name):
         """A loaded Voice by name, cached."""
         if not name or name == self.voice.name:
@@ -471,6 +585,11 @@ class VoiceService(object):
     def _say(self, text, voice=None):
         """Speak, synthesising AHEAD of playback so there are no gaps.
 
+        `text` is either a string, or an ITERABLE of pieces arriving from a
+        model as it writes. The streaming form is what makes a deep answer
+        affordable: chunking only what has arrived keeps time-to-first-word
+        flat instead of growing with the length of the reply.
+
         Saying a long reply as one synth call means waiting for all of it
         before a sound comes out - ~85 s for a two-minute answer. Saying it as
         a series of separate calls is worse: each one opens a sink, plays, and
@@ -484,20 +603,27 @@ class VoiceService(object):
         """
         with self._lock:
             v = self._voice(voice)
-            parts = _chunks(text)
-            if not parts:
-                return {"ok": False, "error": "nothing to say"}
+            said = {"text": ""}
+            if isinstance(text, str):
+                parts = _chunks(text)
+                if not parts:
+                    return {"ok": False, "error": "nothing to say"}
+                said["text"] = text
+            else:
+                parts = _stream_chunks(text, said)
 
             rate = v.rate
             n = int(rate * pcm.FRAME_MS / 1000)
             frames = []                 # grows as synthesis proceeds
             envs = []
             done = threading.Event()
-            state = {"synth": 0.0, "audio": 0.0, "rounding": 0.0, "error": None}
+            state = {"synth": 0.0, "audio": 0.0, "rounding": 0.0, "error": None,
+                     "parts": 0}
 
             def produce():
                 try:
                     for part in parts:
+                        state["parts"] += 1
                         t0 = time.time()
                         samples, _ = v.synth(part)
                         state["synth"] += time.time() - t0
@@ -530,7 +656,7 @@ class VoiceService(object):
                         "error": state["error"] or "voice produced no audio"}
 
             self.speaking = True
-            self.server.publish({"speaking": True, "text": text})
+            self.server.publish({"speaking": True, "text": said["text"]})
             sink = vio.SpeakerSink(device=self.device, rate=rate)
 
             # ONE sink for the entire reply. Opening a new one per sentence is
@@ -587,11 +713,15 @@ class VoiceService(object):
             dur = state["audio"]
             print("said %.1fs in %.1fs (%.2fx, %d chunks) [%s] %s"
                   % (dur, state["synth"], state["synth"] / max(dur, 1e-6),
-                     len(parts), v.name, text[:44].replace("\n", " ")),
+                     state["parts"], v.name,
+                     said["text"][:44].replace("\n", " ")),
                   flush=True)
             return {"ok": True, "duration": round(dur, 2),
-                    "synth": round(state["synth"], 2), "chunks": len(parts),
-                    "voice": v.name}
+                    "synth": round(state["synth"], 2),
+                    "chunks": state["parts"], "voice": v.name,
+                    # The caller may have handed us a generator and so cannot
+                    # know what was actually said until now.
+                    "text": said["text"]}
 
     def start_ears(self, device=None):
         """Begin listening, if there is anything to listen with.

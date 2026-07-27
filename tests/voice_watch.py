@@ -79,8 +79,43 @@ check("brain runs in a neutral cwd, not the project",
       b.cwd)
 check("brain uses an absolute path to the CLI",
       b.exe.startswith("/") or b.exe == "claude", b.exe)
-# Latency matters more than depth for "look and decide whether to greet".
-check("brain defaults to a fast model", agent.DEFAULT_BRAIN_MODEL == "haiku")
+# This used to assert "haiku", on the stated grounds that latency matters more
+# than depth. It was never measured. Same prompts, same box:
+#   haiku mean 10.5s   sonnet 7.7s   opus 7.5s
+# Haiku was the SLOWEST - latency here is dominated by CLI startup and session
+# setup, not by the model - so the "fast" choice cost quality and bought
+# nothing. Pinned so it cannot quietly regress to a small model again on the
+# same wrong reasoning.
+check("brain does not default to the model measured slowest here",
+      agent.DEFAULT_BRAIN_MODEL != "haiku", agent.DEFAULT_BRAIN_MODEL)
+check("brain defaults to opus", agent.DEFAULT_BRAIN_MODEL == "opus",
+      agent.DEFAULT_BRAIN_MODEL)
+
+# Answers to spoken questions must not be capped at greeting length. The
+# prompt asked for "one or two short sentences" AND parse() cut whatever
+# survived at 400 characters, which together is most of why answers felt thin.
+check("a spoken answer may be substantially longer than a camera remark",
+      agent.limit_for("speech") >= agent.limit_for("arrival") * 1.5,
+      (agent.limit_for("speech"), agent.limit_for("arrival")))
+check("a camera remark is still kept short",
+      agent.limit_for("arrival") <= 400, agent.limit_for("arrival"))
+long_answer = "This is a sentence with real content in it. " * 40
+kept = len(agent.parse(long_answer, agent.limit_for("speech")) or "")
+check("a long answer survives to a useful length", kept > 500, kept)
+# ...but not to a lecture. Measured on this voice: ~19 characters per second
+# of speech, so the ceiling is about 37s. A first attempt allowed 1200, and
+# "why is the sky blue" came back as 887 characters - 46.8 SECONDS of talking.
+check("an answer cannot become a monologue",
+      agent.ANSWER_LIMIT / 19.0 < 40.0,
+      "%.0fs of speech" % (agent.ANSWER_LIMIT / 19.0))
+check("the speech lean warns it is talking, not lecturing",
+      "not lecturing" in agent.LEAN["speech"])
+check("the speech lean actually asks for depth",
+      "with real content in it" in agent.LEAN["speech"]
+      and "two to five sentences" in agent.LEAN["speech"])
+check("the camera leans still ask for brevity",
+      "sentence or two" in agent.LEAN["arrival"]
+      and "sentence or two" in agent.LEAN["manual"])
 
 # -- the gate --------------------------------------------------------------
 sock = os.path.join(tempfile.mkdtemp(prefix="tekwatch"), "v.sock")

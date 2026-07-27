@@ -436,6 +436,32 @@ it is constant.
 stream, so a reader just sits blocked forever. A watchdog closes the source to
 break it loose and the reader re-probes.
 
+### The model, and why answers were thin
+
+Answers used to be one flat line because **the prompt asked for that** — "one
+or two short sentences", and then `parse()` cut whatever survived at 400
+characters. No model was going to fix that. Length is now per event: a camera
+greeting is still a sentence or two, an answer is not.
+
+The model was `haiku`, chosen "because latency matters more than depth". That
+was never measured. Same prompts, same box, three questions each:
+
+| model | mean |
+|---|---|
+| `haiku` | **10.5 s** — the *slowest* |
+| `sonnet` | 7.7 s |
+| `opus` | **7.5 s** — fastest *and* best |
+
+Latency here is dominated by CLI startup and session setup, not by the model,
+so the "fast" choice cost quality and bought nothing. Default is now `opus`.
+
+Replies are **spoken as they are written** (`--include-partial-messages`), so
+time-to-first-word no longer grows with the length of the answer — which is
+what makes depth affordable. Measured live: a 624-character answer began
+speaking at 12.7 s and ran 35 s without a gap (15 chunks, producer at 0.92×).
+
+`tools/brain_bench.py` reproduces the model comparison.
+
 A spoken question **skips the camera cooldown**. That cooldown exists to stop
 the camera remarking on an ordinary evening; applying it to someone who spoke
 directly to you reads as broken, not as restraint.

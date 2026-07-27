@@ -148,5 +148,102 @@ for name, txt in (
 
 check("empty text yields no chunks", service._chunks("") == [])
 
+# -- streaming: chunks must come out BEFORE the reply is finished ----------
+# This is what stops a deeper answer costing a longer silence in front of it.
+# Answers were capped at one or two sentences partly because the whole reply
+# had to exist before a single word could be spoken.
+REPLY = ("It's Monday. Sunlight is made of every colour, and the blue part "
+         "bounces off air molecules far more than the red. So when you look "
+         "up, you are seeing blue light scattered at you from the whole sky. "
+         "At sunset the light travels further and the blue is scattered away "
+         "before it reaches you, which is why it goes red.")
+
+
+def dribble(text, n=7):
+    """The reply arriving a few characters at a time, as a model writes it."""
+    for i in range(0, len(text), n):
+        yield text[i:i + n]
+
+
+said = {"text": ""}
+gen = service._stream_chunks(dribble(REPLY), said)
+first = next(gen)
+check("a chunk is available before the whole reply has arrived",
+      len(said["text"]) < len(REPLY), (len(said["text"]), len(REPLY)))
+check("the first streamed chunk is a whole sentence",
+      first == "It's Monday.", first)
+rest = list(gen)
+streamed = [first] + rest
+check("streaming loses nothing",
+      len(" ".join(streamed).split()) == len(REPLY.split()),
+      (len(" ".join(streamed).split()), len(REPLY.split())))
+check("streaming accumulates the full text for the log",
+      said["text"] == REPLY)
+sizes = [len(c) for c in streamed]
+check("streamed chunks respect the ramp ceiling",
+      max(sizes) <= service.CHUNK_RAMP[-1], sizes)
+
+
+def underruns(sizes, rate=0.98, chars_per_sec=16.0):
+    """Seconds of silence a listener would hear, given the chunk sizes.
+
+    The per-pair growth ratio used for the non-streaming packer is the wrong
+    invariant here. Streaming legitimately emits a short chunk whenever a short
+    sentence completes ("It's Monday."), and the next chunk cannot be smaller
+    than one atom, so the ratio is unsatisfiable by construction - while being
+    completely harmless, because by then the producer is seconds ahead.
+
+    What actually matters is whether the buffer ever runs dry. So simulate it:
+    synthesis at the WORST measured rate (0.98x, under contention), playback
+    starting once MIN_LEAD_S is buffered, and check that every chunk is ready
+    before the previous one finishes playing.
+    """
+    audio = [n / chars_per_sec for n in sizes]
+    ready, t = [], 0.0
+    for a in audio:
+        t += a * rate
+        ready.append(t)
+    lead = 0.0
+    start = None
+    for i, a in enumerate(audio):
+        lead += a
+        if lead >= service.MIN_LEAD_S:
+            start = ready[i]
+            break
+    if start is None:
+        return 0.0                      # whole reply buffered before playback
+    gaps, playhead = 0.0, start
+    for i, a in enumerate(audio):
+        if ready[i] > playhead:
+            gaps += ready[i] - playhead
+            playhead = ready[i]
+        playhead += a
+    return gaps
+
+
+gap = underruns(sizes)
+check("streamed chunks never starve playback (simulated at 0.98x)",
+      gap < 0.05, "%.2fs of silence, sizes %s" % (gap, sizes))
+# The same simulation must also condemn a genuinely bad pattern, or it proves
+# nothing: 30 characters followed by 300 is what the ramp exists to prevent.
+check("the starvation check can actually fail",
+      underruns([30, 300, 300]) > 0.5, underruns([30, 300, 300]))
+
+# Text with no sentence end at all must still come out, not stall forever.
+said2 = {"text": ""}
+none_end = list(service._stream_chunks(dribble("words " * 60), said2))
+check("a reply with no sentence ending still produces chunks",
+      len(none_end) > 1, len(none_end))
+check("and loses nothing", len(" ".join(none_end).split()) == 60,
+      len(" ".join(none_end).split()))
+
+# A model that says nothing must not produce a chunk.
+said3 = {"text": ""}
+check("an empty stream yields no chunks",
+      list(service._stream_chunks(iter([]), said3)) == [])
+
+check("the shortest speakable prefix is short enough to matter",
+      service.MIN_SPEAK <= 15, service.MIN_SPEAK)
+
 print("VOICE PCM " + ("OK" if not FAIL else "FAILED: " + ", ".join(FAIL)))
 sys.exit(1 if FAIL else 0)

@@ -163,6 +163,26 @@ def heard_wake(text):
 _WAKE_FUZZ = 0.55
 
 
+def wake_only(text):
+    """Was that JUST the wake word, with no command attached?
+
+    Needed because the free decoder mangles the wake word, and a mangled wake
+    word does not strip. Observed: someone said "hey tek" and nothing else,
+    the decoder wrote "hate tech", strip_wake left it alone because there was
+    no command after it to strip from - and "hate tech" was then dispatched as
+    the question. It answered as though the speaker had announced they dislike
+    technology, which is a memorable way to be wrong.
+    """
+    import difflib
+    t = (text or "").strip().strip('"').lower()
+    if not t:
+        return True
+    if any(t == w or t.rstrip(".,!?") == w for w in WAKE_WORDS):
+        return True
+    return max(difflib.SequenceMatcher(None, t, w).ratio()
+               for w in WAKE_WORDS) >= _WAKE_FUZZ
+
+
 def strip_wake(text):
     """Remove the wake word from the front of a command.
 

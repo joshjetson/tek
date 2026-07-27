@@ -30,10 +30,34 @@ BRAIN_CWD = os.path.expanduser("~/.cache/tekdromo/brain")
 
 SILENCE = "SILENCE"
 
-# Speed matters more than depth for "look at a photo and decide whether to
-# say hello". A greeting that lands ten seconds after someone walks in reads
-# as a malfunction.
-DEFAULT_BRAIN_MODEL = "haiku"
+# How long a reply may be, by kind. A camera greeting really should be one or
+# two sentences - a face that monologues at you when you walk in is worse than
+# a silent one. An ANSWER to a spoken question is a different thing, and
+# capping it at the greeting length was most of why answers felt thin: the
+# prompt asked for "one or two short sentences" and then this cut whatever
+# survived at 400 characters.
+#
+# Measured on this voice: 887 characters came out as 46.8 seconds of speech,
+# about 19 characters per second. The first attempt at a fix allowed 1200,
+# which is over a minute of talking in reply to "why is the sky blue" - that
+# is not depth, it is a lecture, and it is its own kind of broken. 700 is
+# about 37 seconds as a hard ceiling, with the prompt steering to well under
+# it; the cap exists to stop a runaway, not to set the length.
+REMARK_LIMIT = 400
+ANSWER_LIMIT = 700
+
+# Opus, and NOT for the reason you would expect. This was "haiku", on the
+# stated grounds that speed matters more than depth for deciding whether to say
+# hello. Nobody had measured it. Same prompts, same box, three questions each:
+#
+#   haiku    9.40s  11.14s  11.10s     mean 10.5s
+#   sonnet   6.74s   8.86s   7.52s     mean  7.7s
+#   opus     6.71s   9.01s   6.83s     mean  7.5s
+#
+# Haiku was the SLOWEST of the three. Latency here is dominated by CLI startup
+# and session setup rather than by the model, so the "fast" choice bought
+# nothing and cost the quality of every answer. Opus is both faster and better.
+DEFAULT_BRAIN_MODEL = "opus"
 
 # Deliberately heavy on restraint. The failure mode of an always-on camera with
 # a voice is not "it missed something", it is "it will not shut up" - so the
@@ -49,10 +73,11 @@ Time: %(when)s. Faces detected: %(faces)d.
 %(look)s
 %(lean)s
 
-If you speak: one or two short sentences, warm and specific, the way someone in
-the room would say it. No emoji, no formatting, no stage directions, no
-describing the photo back - it is read aloud exactly as written. Use a name
-only if the description above makes you reasonably confident.
+Everything you write is read aloud exactly as written, so: no emoji, no
+formatting, no bullet points, no headings, no stage directions, and no
+describing the photo back. Write the way a person talks, not the way a person
+writes. Use a name only if the description above makes you reasonably
+confident.
 
 Reply with EXACTLY the single word %(silence)s to say nothing.
 Otherwise reply with ONLY the words to speak."""
@@ -65,26 +90,48 @@ LEAN = {
     "manual": u"""You have been asked directly, right now, to look and respond.
 Say something unless there is genuinely nothing there - an empty room, or a
 frame too dark to read. If someone is visible, greet them or remark on what
-they are doing. This is not the moment for restraint.""",
+they are doing. This is not the moment for restraint.
+
+Keep it to a sentence or two - you are remarking on a room, not answering a
+question.""",
 
     "arrival": u"""Someone has just come into view. A short greeting is
 appropriate and welcome - that is the main reason you are here. Greet them by
 name if you can tell who it is.
 
 Stay silent only if you greeted them very recently, if the frame is too unclear
-to tell anything, or if what you would say adds nothing.""",
+to tell anything, or if what you would say adds nothing.
+
+Keep it to a sentence or two. A greeting that runs on is worse than none.""",
 
     "speech": u"""Someone has just SPOKEN TO YOU, out loud, using your wake
-word. Answer them. This is a conversation, not a decision about whether to
-interrupt one - staying silent when a person has directly addressed you is the
-one thing that makes the device feel broken.
+word. Answer them properly. This is a conversation, not a decision about
+whether to interrupt one - staying silent when a person has directly addressed
+you is the one thing that makes the device feel broken.
 
-Answer in one or two spoken sentences. If you did not understand, say so
-plainly and ask them to repeat it, rather than guessing or saying nothing.
-Only stay silent if the words are clearly not addressed to you at all.
+ANSWER THE QUESTION THEY ACTUALLY ASKED, with real content in it. A question
+about the time deserves a sentence. A question about how something works
+deserves the actual reason - two to five sentences, the way a well-read friend
+would explain it across the kitchen table. Do not give a thin, hedged,
+one-line answer to a question with substance in it; that is worse than saying
+nothing. Be specific and concrete, and say the interesting part rather than
+gesturing at it.
 
-Remember the transcript comes from a small speech recogniser in a room, so it
-may be slightly wrong. Read through obvious mishearings.""",
+But you are TALKING, not lecturing. Everything you write is spoken aloud at
+approximately three words a second, so eight sentences is nearly a minute of
+someone standing there listening. Stop when you have answered it. If there is
+more worth saying, let them ask. Never go beyond about six sentences.
+
+Do not pad either. No throat-clearing, no "great question", no restating the
+question, no offering to elaborate, no summing up at the end. Start with the
+answer.
+
+If you did not understand, say so plainly and ask them to repeat it, rather
+than guessing or saying nothing. Only stay silent if the words are clearly not
+addressed to you at all.
+
+The transcript comes from a small speech recogniser in a room, so it may be
+slightly wrong. Read through obvious mishearings.""",
 
     "default": u"""Decide whether speaking would be welcome. Prefer silence if
 you spoke recently or would only be restating what is obvious.""",
@@ -253,10 +300,89 @@ class ClaudeBrain(Brain):
             return None
         self.last_error = None
         text = (out or b"").decode("utf-8", "replace").strip()
-        return parse(text)
+        return parse(text, limit_for(event.get("kind")))
+
+    def stream(self, event):
+        """Yield the reply in pieces, as the model writes it.
+
+        Time-to-first-word stops depending on how long the answer is, which is
+        what makes a deeper answer affordable. Measured on this box for a
+        four-sentence reply: first token 4.70 s, first complete sentence
+        6.14 s, whole reply 7.16 s - and the gap grows with length, because
+        only the first sentence has to exist before speaking can start.
+
+        Nothing is yielded until a decline can be ruled out. Otherwise the
+        first thing out of the speaker would be the word "SILENCE", which is
+        the exact failure `parse` exists to prevent - streaming just makes it
+        possible to say it before knowing better.
+        """
+        cmd = [self.exe, "-p", self.build_prompt(event),
+               "--allowed-tools", "Read",
+               "--no-session-persistence", "--disable-slash-commands",
+               "--model", self.model or DEFAULT_BRAIN_MODEL,
+               "--output-format", "stream-json", "--verbose",
+               "--include-partial-messages"]
+        limit = limit_for(event.get("kind"))
+        p = None
+        try:
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, cwd=self.cwd)
+        except OSError as e:
+            self.last_error = "cannot run %r: %s" % (self.exe, e)
+            print("brain: %s" % self.last_error, flush=True)
+            return
+
+        deadline = time.time() + self.timeout
+        head, opened, sent = "", False, 0
+        try:
+            for line in p.stdout:
+                if time.time() > deadline:
+                    self.last_error = "timed out after %ss" % self.timeout
+                    print("brain: %s" % self.last_error, flush=True)
+                    break
+                try:
+                    msg = json.loads(line.decode("utf-8", "replace"))
+                except ValueError:
+                    continue
+                if msg.get("type") != "stream_event":
+                    continue
+                ev = msg.get("event", {})
+                if ev.get("type") != "content_block_delta":
+                    continue
+                piece = ev.get("delta", {}).get("text") or ""
+                if not piece:
+                    continue
+                if not opened:
+                    # Hold back only until a decline can be ruled out. Every
+                    # character withheld here is latency, so the test is
+                    # exactly "could this still turn into SILENCE?" and
+                    # nothing more.
+                    head += piece
+                    bare = head.strip().strip('"').upper()
+                    if bare and SILENCE.startswith(bare):
+                        continue                    # still might be SILENCE
+                    if bare.startswith(SILENCE):
+                        return                      # it is
+                    opened = True
+                    piece, head = head, ""
+                if sent >= limit:
+                    break
+                yield piece
+                sent += len(piece)
+        finally:
+            if p is not None:
+                try:
+                    p.kill()
+                    p.wait()
+                except Exception:
+                    pass
+        if not opened and head.strip():
+            out = parse(head, limit)
+            if out:
+                yield out
 
 
-def parse(text):
+def parse(text, limit=REMARK_LIMIT):
     """Model output -> words to speak, or None.
 
     Anything that looks like a refusal to speak becomes None. Being liberal
@@ -277,9 +403,15 @@ def parse(text):
     if low.startswith(("i would stay", "i'll stay", "i will stay",
                        "nothing to say", "no comment")):
         return None
-    if len(t) > 400:                        # a speech, not a greeting
-        t = t[:400].rsplit(".", 1)[0] + "."
+    if len(t) > limit:
+        cut = t[:limit].rsplit(".", 1)[0]
+        t = (cut + ".") if len(cut) > limit // 3 else t[:limit].rstrip() + "."
     return t
+
+
+def limit_for(kind):
+    """How many characters this kind of event may be worth speaking."""
+    return ANSWER_LIMIT if kind == "speech" else REMARK_LIMIT
 
 
 def load(model=None):

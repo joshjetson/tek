@@ -289,7 +289,18 @@ class Ears(object):
         # actually talk.
         text = self.free.transcribe(samples)
         rest = stt.strip_wake(text)
-        if rest:
+        # If strip_wake removed something, what is left IS the command - do not
+        # second-guess it. wake_only is only consulted when nothing was
+        # stripped, which means the decoder produced a couple of words with no
+        # recognisable wake phrase in front. That is nearly always a mangled
+        # bare wake word ("hate tech" for "hey tek"), and dispatching it as a
+        # question got an answer about disliking technology.
+        #
+        # Narrowing it to that case matters: on the whole string the fuzzy test
+        # cannot separate "we tank" (0.57, a wake word) from "hey there" (0.75,
+        # a greeting), so it must not be asked about strings where the answer
+        # is already known.
+        if rest and (rest != text.strip() or not stt.wake_only(rest)):
             self._command(rest, secs)
         else:
             self.armed_until = time.monotonic() + self.window
