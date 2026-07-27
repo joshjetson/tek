@@ -183,7 +183,7 @@ class Clock(object):
 
     def __init__(self, w, h, margin=26, digit=(26, 44), small=(15, 24),
                  ghosts=False, seconds=True, weekday=True, slab=True,
-                 yaw=-0.34, pitch=0.12, depth=0.09):
+                 yaw=-0.34, pitch=0.12, depth=0.09, glyph_depth=0.04):
         self.w, self.h = w, h
         self.margin = margin
         self.dw, self.dh = digit
@@ -193,6 +193,10 @@ class Clock(object):
         self.show_weekday = weekday
         self.slab = slab
         self.yaw, self.pitch, self.depth = yaw, pitch, depth
+        # Digits are extruded less than the housing. At the same depth every
+        # stroke doubles far enough to muddy the time; at zero they are flat
+        # plates floating in a 3D frame.
+        self.glyph_depth = glyph_depth
         self._key = None
         self._pts = np.zeros((0, 2, 2), np.int32)
         self._dim = np.zeros((0, 2, 2), np.int32)
@@ -274,54 +278,68 @@ class Clock(object):
         glyphs = to_pts(rule + shift(lit))
         faint = to_pts(shift(dim))
 
-        if self.slab:
-            front, back = self._slab(bx, by, bw, bh)
-            bright = np.concatenate([front, glyphs])
-            faint = np.concatenate([faint, back]) if len(faint) else back
-            allp = np.concatenate([bright, faint])
-            rect = (allp[..., 0].min(), allp[..., 1].min(),
-                    allp[..., 0].ptp(), allp[..., 1].ptp())
-            return bright, faint, rect
-
         frame = to_pts(box(bx, by, bw, bh, notch=7))
-        return (np.concatenate([frame, glyphs]), faint, (bx, by, bw, bh))
+        if not self.slab:
+            return (np.concatenate([frame, glyphs]), faint, (bx, by, bw, bh))
 
-    def _slab(self, bx, by, bw, bh):
-        """The bezel as a real 3D slab, projected with the SAME maths the head
-        uses - geometry.rotate and geometry.project, not a copy of them.
+        bright, back, rect = self._project(frame, np.concatenate([glyphs, faint])
+                                           if len(faint) else glyphs,
+                                           bx, by, bw, bh)
+        return bright, back, rect
 
-        Only the bezel is three-dimensional. Projecting the digits too was
-        tried and is worse: perspective skews them and the extrusion doubles
-        every stroke, so the time becomes hard to read. A flat readout in a
-        dimensional housing is what a real instrument looks like anyway.
+    def _project(self, bezel, glyphs, bx, by, bw, bh):
+        """Put the WHOLE panel on a tilted plane and extrude it.
+
+        Uses geometry.rotate and geometry.project - the functions the head
+        itself calls, not copies of them.
+
+        The digits are projected onto the same plane as the housing, which is
+        both more dimensional and simply more correct: they are printed on the
+        panel, so leaving them flat while the bezel tilted meant they did not
+        lie on it at all.
+
+        They are extruded LESS than the housing. Rendered at the same depth
+        every glyph stroke doubles far enough apart to muddy the time, which is
+        the one thing a clock may not do; at zero depth they read as flat
+        plates floating inside a 3D frame.
         """
         from . import geometry
-        flat = box(0, 0, bw, bh, notch=7)
-        v = np.array([[p[0], p[1]] for seg in flat for p in seg],
-                     dtype=np.float32)
-        sc = 1.0 / max(bw, bh)
-        X = (v[:, 0] - bw * 0.5) * sc
-        Y = -(v[:, 1] - bh * 0.5) * sc
         R = geometry.rotate(np.eye(3, dtype=np.float32), self.pitch,
                             self.yaw, 0.0)
+        sc = 1.0 / max(bw, bh)
 
-        def proj(z0):
+        def proj(arr, z0):
+            v = arr.reshape(-1, 2).astype(np.float32)
+            X = (v[:, 0] - bx - bw * 0.5) * sc
+            Y = -(v[:, 1] - by - bh * 0.5) * sc
             V = np.stack([X, Y, np.full_like(X, z0)], axis=1) @ R
             return geometry.project(V, self.w, self.h, dist=2.2, fov=1.0)[0]
 
-        f, b = proj(0.0), proj(self.depth)
-        both = np.concatenate([f, b])
+        bf, bb = proj(bezel, 0.0), proj(bezel, self.depth)
+        gf = proj(glyphs, 0.0)
+        gb = proj(glyphs, self.glyph_depth) if self.glyph_depth > 0 else None
+
+        parts = [bf, bb, gf] + ([gb] if gb is not None else [])
+        allp = np.concatenate(parts)
         # Restore the intended size and corner. Perspective shrinks it, and a
         # clock that changes size because it is tilted is not a clock.
-        k = (bw * 1.06) / max(both[:, 0].ptp(), 1e-3)
-        ox = bx - both[:, 0].min() * k - 6
-        oy = by - both[:, 1].min() * k - 6
-        f = f * k + [ox, oy]
-        b = b * k + [ox, oy]
-        joins = np.stack([f, b], axis=1)
-        return (np.rint(f.reshape(-1, 2, 2)).astype(np.int32),
-                np.rint(np.concatenate([b.reshape(-1, 2, 2), joins])
-                        ).astype(np.int32))
+        k = (bw * 1.06) / max(allp[:, 0].ptp(), 1e-3)
+        ox = bx - allp[:, 0].min() * k - 6
+        oy = by - allp[:, 1].min() * k - 6
+        fix = lambda a: a * k + [ox, oy]
+        bf, bb, gf = fix(bf), fix(bb), fix(gf)
+
+        bright = np.concatenate([bf.reshape(-1, 2, 2), gf.reshape(-1, 2, 2)])
+        dim = [bb.reshape(-1, 2, 2), np.stack([bf, bb], axis=1)]
+        if gb is not None:
+            gb = fix(gb)
+            dim += [gb.reshape(-1, 2, 2), np.stack([gf, gb], axis=1)]
+        dim = np.concatenate(dim)
+        every = np.concatenate([bright, dim])
+        rect = (every[..., 0].min(), every[..., 1].min(),
+                every[..., 0].ptp(), every[..., 1].ptp())
+        return (np.rint(bright).astype(np.int32),
+                np.rint(dim).astype(np.int32), rect)
 
     def points(self, when=None):
         """Cached per displayed second."""

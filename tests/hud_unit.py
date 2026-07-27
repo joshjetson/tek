@@ -115,8 +115,13 @@ cg = hud.Clock(W, H)
 cg.points(at(2026, 7, 26, 10, 8, 42))
 check("unlit segments are emitted separately for the dim layer",
       len(cg.dim_points()) > 0, len(cg.dim_points()))
-check("the dim layer is a different set from the bright one",
-      len(cg.dim_points()) < len(cg.points()))
+# With extrusion the dim layer is LARGER than the bright one, not smaller:
+# every front stroke gains a back copy and a join. An earlier version of this
+# check asserted dim < bright, which was true only while the digits were flat.
+check("every front stroke has a back copy and a join",
+      len(cg.dim_points()) >= len(cg.points()) * 1.5,
+      (len(cg.points()), len(cg.dim_points())))
+check("the dim layer is not empty", len(cg.dim_points()) > 0)
 # The dim layer now carries the SLAB's back face as well as any unlit
 # segments, so "ghosts off" no longer means "dim layer empty".
 cg2 = hud.Clock(W, H, ghosts=True, slab=True)
