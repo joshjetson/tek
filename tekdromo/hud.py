@@ -177,10 +177,13 @@ class Clock(object):
     # seven-segment display read as hardware rather than as drawn text - and it
     # only works with a real dim layer. Rendered at full brightness the stubs
     # merge with the lit segments and "8:47" reads as "8:40".
-    GHOST_LEVEL = 0.18
+    # Brightness of everything on the dim layer: the slab's back face and its
+    # corner joins, and the unlit segments if those are switched on.
+    GHOST_LEVEL = 0.35
 
     def __init__(self, w, h, margin=26, digit=(26, 44), small=(15, 24),
-                 ghosts=True, seconds=True, weekday=True):
+                 ghosts=False, seconds=True, weekday=True, slab=True,
+                 yaw=-0.34, pitch=0.12, depth=0.09):
         self.w, self.h = w, h
         self.margin = margin
         self.dw, self.dh = digit
@@ -188,6 +191,8 @@ class Clock(object):
         self.ghosts = ghosts
         self.show_seconds = seconds
         self.show_weekday = weekday
+        self.slab = slab
+        self.yaw, self.pitch, self.depth = yaw, pitch, depth
         self._key = None
         self._pts = np.zeros((0, 2, 2), np.int32)
         self._dim = np.zeros((0, 2, 2), np.int32)
@@ -260,15 +265,63 @@ class Clock(object):
         bx = self.w - self.margin - bw
         by = self.margin
 
-        frame = box(bx, by, bw, bh, notch=7)
         ry = by + pad_y + self.dh + 9
-        frame.append(((bx + pad_x, ry), (bx + bw - pad_x, ry)))
+        rule = [((bx + pad_x, ry), (bx + bw - pad_x, ry))]
 
         ox, oy = bx + pad_x, by + pad_y
         shift = lambda L: [((a[0] + ox, a[1] + oy), (b[0] + ox, b[1] + oy))
                            for a, b in L]
-        return (to_pts(frame + shift(lit)), to_pts(shift(dim)),
-                (bx, by, bw, bh))
+        glyphs = to_pts(rule + shift(lit))
+        faint = to_pts(shift(dim))
+
+        if self.slab:
+            front, back = self._slab(bx, by, bw, bh)
+            bright = np.concatenate([front, glyphs])
+            faint = np.concatenate([faint, back]) if len(faint) else back
+            allp = np.concatenate([bright, faint])
+            rect = (allp[..., 0].min(), allp[..., 1].min(),
+                    allp[..., 0].ptp(), allp[..., 1].ptp())
+            return bright, faint, rect
+
+        frame = to_pts(box(bx, by, bw, bh, notch=7))
+        return (np.concatenate([frame, glyphs]), faint, (bx, by, bw, bh))
+
+    def _slab(self, bx, by, bw, bh):
+        """The bezel as a real 3D slab, projected with the SAME maths the head
+        uses - geometry.rotate and geometry.project, not a copy of them.
+
+        Only the bezel is three-dimensional. Projecting the digits too was
+        tried and is worse: perspective skews them and the extrusion doubles
+        every stroke, so the time becomes hard to read. A flat readout in a
+        dimensional housing is what a real instrument looks like anyway.
+        """
+        from . import geometry
+        flat = box(0, 0, bw, bh, notch=7)
+        v = np.array([[p[0], p[1]] for seg in flat for p in seg],
+                     dtype=np.float32)
+        sc = 1.0 / max(bw, bh)
+        X = (v[:, 0] - bw * 0.5) * sc
+        Y = -(v[:, 1] - bh * 0.5) * sc
+        R = geometry.rotate(np.eye(3, dtype=np.float32), self.pitch,
+                            self.yaw, 0.0)
+
+        def proj(z0):
+            V = np.stack([X, Y, np.full_like(X, z0)], axis=1) @ R
+            return geometry.project(V, self.w, self.h, dist=2.2, fov=1.0)[0]
+
+        f, b = proj(0.0), proj(self.depth)
+        both = np.concatenate([f, b])
+        # Restore the intended size and corner. Perspective shrinks it, and a
+        # clock that changes size because it is tilted is not a clock.
+        k = (bw * 1.06) / max(both[:, 0].ptp(), 1e-3)
+        ox = bx - both[:, 0].min() * k - 6
+        oy = by - both[:, 1].min() * k - 6
+        f = f * k + [ox, oy]
+        b = b * k + [ox, oy]
+        joins = np.stack([f, b], axis=1)
+        return (np.rint(f.reshape(-1, 2, 2)).astype(np.int32),
+                np.rint(np.concatenate([b.reshape(-1, 2, 2), joins])
+                        ).astype(np.int32))
 
     def points(self, when=None):
         """Cached per displayed second."""

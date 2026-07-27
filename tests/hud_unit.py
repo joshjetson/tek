@@ -117,9 +117,39 @@ check("unlit segments are emitted separately for the dim layer",
       len(cg.dim_points()) > 0, len(cg.dim_points()))
 check("the dim layer is a different set from the bright one",
       len(cg.dim_points()) < len(cg.points()))
-cn = hud.Clock(W, H, ghosts=False)
+# The dim layer now carries the SLAB's back face as well as any unlit
+# segments, so "ghosts off" no longer means "dim layer empty".
+cg2 = hud.Clock(W, H, ghosts=True, slab=True)
+cg2.points(at(2026, 7, 26, 10, 8, 42))
+cn = hud.Clock(W, H, ghosts=False, slab=True)
 cn.points(at(2026, 7, 26, 10, 8, 42))
-check("ghosts can be turned off", len(cn.dim_points()) == 0)
+check("ghosts add to the dim layer and can be turned off",
+      len(cn.dim_points()) < len(cg2.dim_points()),
+      (len(cn.dim_points()), len(cg2.dim_points())))
+bare = hud.Clock(W, H, ghosts=False, slab=False)
+bare.points(at(2026, 7, 26, 10, 8, 42))
+check("with neither, nothing goes to the dim layer",
+      len(bare.dim_points()) == 0, len(bare.dim_points()))
+
+# The slab is drawn with the head's own projection, and must not grow off
+# screen or over the face panel.
+sl = hud.Clock(W, H, slab=True)
+sl.points(at(2026, 7, 26, 10, 8, 42))
+sx, sy, sw2, sh2 = sl.rect
+check("the 3D slab stays on screen",
+      sx >= 0 and sy >= 0 and sx + sw2 <= W and sy + sh2 <= H,
+      (sx, sy, sw2, sh2))
+check("the slab has visible depth (back face offset from the front)",
+      len(sl.dim_points()) > 8, len(sl.dim_points()))
+# And it still must not resize as the time changes.
+srects = set()
+for hh2 in (1, 9, 10, 12, 23):
+    for ss2 in (0, 1, 59):
+        cc2 = hud.Clock(W, H, slab=True)
+        cc2.points(at(2026, 7, 26, hh2, 34, ss2))
+        srects.add(tuple(int(v) for v in cc2.rect))
+check("the slab does not resize with the time", len(srects) == 1,
+      sorted(srects))
 
 x, y, bw, bh = list(rects)[0]
 
