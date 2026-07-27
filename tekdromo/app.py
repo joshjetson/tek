@@ -58,6 +58,26 @@ def _src_hash():
     return h.hexdigest()[:16]
 
 
+def _find_camera():
+    """Index of the first usable video device, or None.
+
+    NOT hardcoded to /dev/video0. A USB camera that is unplugged, reset, or
+    re-enumerated while its old node is still held comes back as video1 - which
+    happened here after a USB reset - and a hardcoded video0 then never finds
+    it again. Cheap to scan; the alternative is a camera that silently stays
+    dead until someone reboots.
+    """
+    import glob
+    for path in sorted(glob.glob("/dev/video*")):
+        try:
+            n = int(path[len("/dev/video"):])
+        except ValueError:
+            continue
+        if os.access(path, os.R_OK):
+            return n
+    return None
+
+
 def cache_warm():
     """Is the geometry already on disk? Decides whether a wait is worth
     announcing: warm is ~1.3s to a picture, cold is ~5s."""
@@ -282,16 +302,17 @@ class Display:
         this thread's job ends at the first successful attach.
         """
         while self.running:
-            if os.path.exists("/dev/video0"):
+            dev = _find_camera()
+            if dev is not None:
                 try:
                     from . import camera
                     follow = camera.Follower()
-                    cam = camera.Tracker().start()
+                    cam = camera.Tracker(device=dev).start()
                     # follow first: pose() reads self.cam as the guard, so the
                     # follower must already exist when cam becomes non-None.
                     self.follow, self.cam = follow, cam
-                    print("[%5.2fs] camera attached" % (time.time() - T_START),
-                          flush=True)
+                    print("[%5.2fs] camera attached (/dev/video%d)"
+                          % (time.time() - T_START, dev), flush=True)
                     return
                 except Exception:
                     traceback.print_exc()
