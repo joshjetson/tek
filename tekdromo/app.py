@@ -135,6 +135,7 @@ class Display:
         # or never exist, without the display noticing.
         self.mouth = voice_link.MouthLink().start()
         self.clock = None if self.a.no_clock else hud.Clock(self.w, self.h)
+        self.scope = None if self.a.no_scope else hud.Scope(self.w, self.h)
         # Camera-event state. Transitions are debounced here; the policy of
         # whether to act on them lives in the voice service.
         self._watch_state = False
@@ -203,6 +204,36 @@ class Display:
                      else "whoever was there has gone"),
             "faces": 1 if present else 0,
         })
+
+    def _scope_feeder(self):
+        """Feed the scope from PulseAudio's sink monitor.
+
+        @DEFAULT_MONITOR@ rather than a named device, so it follows the default
+        sink: when the Bluetooth speaker connects or drops, the trace follows
+        the audio instead of going flat against a device nobody is using.
+
+        Reconnects forever. parec exits if the sink disappears, and a scope
+        that stays dead after the speaker reconnects is worse than no scope.
+        """
+        from .voice import io as vio
+        while self.running:
+            src = None
+            try:
+                src = vio.MicSource(device="@DEFAULT_MONITOR@")
+                for frame in src:
+                    if not self.running or self.scope is None:
+                        break
+                    self.scope.push(frame)
+            except Exception:
+                pass
+            finally:
+                if src is not None:
+                    try:
+                        src.close()
+                    except Exception:
+                        pass
+            if self.running:
+                time.sleep(3.0)
 
     def _event_worker(self):
         """Snapshot and send. Off the render loop entirely.
@@ -300,6 +331,8 @@ class Display:
         threading.Thread(target=self._watchdog, daemon=True).start()
         threading.Thread(target=self._background_init, daemon=True).start()
         threading.Thread(target=self._event_worker, daemon=True).start()
+        if self.scope is not None:
+            threading.Thread(target=self._scope_feeder, daemon=True).start()
         if not self.a.no_camera:
             threading.Thread(target=self._wait_for_camera, daemon=True).start()
         t0 = prev = tick = time.time()
@@ -332,10 +365,14 @@ class Display:
                 # they are simply concatenated and go through ONE render pass.
                 # Drawing them separately would mean a second bloom and a
                 # second LUT, and two looks that drift apart.
+                panels = []
                 if self.clock is not None:
-                    cp = self.clock.points()
-                    if len(cp):
-                        pts = np.concatenate([pts, cp]) if len(pts) else cp
+                    panels.append(self.clock.points())
+                if self.scope is not None:
+                    panels.append(self.scope.points())
+                if panels:
+                    pts = np.concatenate([pts] + panels) if len(pts) \
+                        else np.concatenate(panels)
                 frame = phosphor.render_bgra(pts, self.w, self.h, self.statics)
                 if self.stars is not None:
                     frame = self.stars.under(frame, t)
@@ -417,6 +454,8 @@ def main(argv=None):
     ap.add_argument("--no-stars", action="store_true")
     ap.add_argument("--no-clock", action="store_true",
                     help="hide the clock/date panel")
+    ap.add_argument("--no-scope", action="store_true",
+                    help="hide the audio waveform panel")
     ap.add_argument("--max-fps", type=float, default=30.0,
                     help="frame cap. Rendering flat-out burns power for no "
                          "visible benefit and this board has thin current "

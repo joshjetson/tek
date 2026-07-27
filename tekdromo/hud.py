@@ -52,7 +52,8 @@ _CHARS = {
     "1": [[(0.5, 0.0), (0.5, 1.0)]],
     "-": [[(0.1, 0.5), (0.9, 0.5)]],
     ".": [[(0.45, 0.92), (0.55, 0.92)]],
-    " ": [],
+    " ": [],          # narrow blank - stands in for the blinking colon
+    "_": [],          # full-width blank - pads a single-digit hour
     "A": [[(0.0, 1.0), (0.5, 0.0), (1.0, 1.0)], [(0.18, 0.62), (0.82, 0.62)]],
     "P": [[(0.0, 1.0), (0.0, 0.0), (1.0, 0.0), (1.0, 0.5), (0.0, 0.5)]],
     "M": [[(0.0, 1.0), (0.0, 0.0), (0.5, 0.55), (1.0, 0.0), (1.0, 1.0)]],
@@ -87,11 +88,15 @@ def text(s, x, y, cw, ch, gap=None, narrow=0.45):
     gap = cw * 0.28 if gap is None else gap
     out, cx = [], float(x)
     for chch in s:
-        # Punctuation is narrow; a SPACE is not. A space here is the pad in
-        # front of a single-digit hour, and it has to occupy exactly one digit
-        # cell or " 6:53" comes out narrower than "11:53" and the panel resizes
-        # every time the hour crosses 10 or 1.
-        cell = cw * narrow if chch in ":./" else cw
+        # TWO kinds of blank, and conflating them made the panel pulse once a
+        # second:
+        #   " " is a NARROW blank, the same width as the colon it replaces
+        #       when the colon blinks off.
+        #   "_" is a FULL-WIDTH blank, the pad in front of a single-digit hour,
+        #       and must be exactly one digit cell.
+        # Using a space for both meant the blink alternated between a narrow
+        # cell and a full one, so the box grew and shrank every second.
+        cell = cw * narrow if chch in ":./ " else cw
         out.extend(_place(_seg_lines(chch), cx, y, cell, ch))
         cx += cell + gap
     return out, (cx - gap) - x
@@ -139,11 +144,10 @@ class Clock(object):
         rather than being pinned to one of them."""
         lt = time.localtime(when)
         hour12 = lt.tm_hour % 12 or 12
-        # Padded to a fixed width. Without this the panel is one cell narrower
-        # from 1:00 to 9:59 and visibly resizes on the hour - the box is sized
-        # from its contents, so a 4-character time makes a smaller box than a
-        # 5-character one.
-        return ("%2d:%02d" % (hour12, lt.tm_min),
+        # Padded to a fixed width with "_", a full-width blank. Without it the
+        # panel is one cell narrower from 1:00 to 9:59 and visibly resizes on
+        # the hour, because the box is sized from its contents.
+        return ("%s%d:%02d" % ("_" if hour12 < 10 else "", hour12, lt.tm_min),
                 "PM" if lt.tm_hour >= 12 else "AM",
                 time.strftime("%m/%d/%Y", lt))
 
@@ -189,3 +193,88 @@ class Clock(object):
             self._key = key
             self._pts, self.rect = self.build(now)
         return self._pts
+
+
+class Scope(object):
+    """An oscilloscope trace of whatever is coming out of the speaker.
+
+    Fed from PulseAudio's sink MONITOR rather than from the voice service, so
+    it shows *everything the machine plays* - speech, music, anything else -
+    with no cooperation from whatever produced it. One source, every case.
+
+    A vector display genuinely is an oscilloscope, so this is about the most
+    native thing the panel could show.
+    """
+
+    def __init__(self, w, h, margin=26, width=300, height=104, cols=128,
+                 window=512):
+        self.w, self.h = w, h
+        self.bw, self.bh = width, height
+        self.bx = w - margin - width
+        self.by = h - margin - height
+        self.cols = cols
+        self.window = window
+        self.buf = np.zeros(window * 4, np.float32)
+        # Slow-decaying peak. Speech and music differ by tens of dB, so a fixed
+        # gain shows either a flat line or a clipped mess; tracking the peak and
+        # letting it fall slowly keeps quiet passages visible without the trace
+        # jumping about on every transient.
+        self.peak = 0.05
+        self._frame = None
+
+    def push(self, samples):
+        s = np.asarray(samples, dtype=np.float32) / 32767.0
+        if not len(s):
+            return
+        n = min(len(s), len(self.buf))
+        self.buf = np.roll(self.buf, -n)
+        self.buf[-n:] = s[-n:]
+        self.peak = max(float(np.abs(s).max()), self.peak * 0.90)
+
+    def _triggered(self):
+        """A window starting at a rising zero crossing.
+
+        Without a trigger the waveform slides sideways every frame and reads as
+        noise; with one it stands still, which is what makes a scope legible.
+
+        Vectorised. The obvious Python loop over candidate offsets, together
+        with a per-column argmax below, cost 30 ms a frame - the entire budget
+        at 30 fps, for a decoration.
+        """
+        w, half = self.window, self.window // 2
+        seg = self.buf[-(w + half):]
+        head = seg[:half]
+        rising = np.nonzero((head[:-1] <= 0.0) & (head[1:] > 0.0))[0]
+        i = int(rising[0]) if len(rising) else 0
+        return seg[i:i + w]
+
+    def points(self):
+        pad_x, pad_y = 12, 10
+        ix, iy = self.bx + pad_x, self.by + pad_y
+        iw, ih = self.bw - pad_x * 2, self.bh - pad_y * 2
+        mid = iy + ih * 0.5
+
+        # The bezel and the axis never change; building them 30 times a second
+        # is pure waste.
+        if self._frame is None:
+            segs = box(self.bx, self.by, self.bw, self.bh, notch=7)
+            for k in range(0, iw, 14):
+                segs.append(((ix + k, mid), (ix + min(k + 7, iw), mid)))
+            self._frame = to_pts(segs)
+        frame = self._frame
+
+        wave = self._triggered()
+        per = max(1, self.window // self.cols)
+        n = self.cols * per
+        # Decimate by bucket PEAK, not by sampling: taking every Nth sample
+        # drops the transients that carry the shape, so a drum hit vanishes.
+        # Reshape + argmax along an axis does all the buckets in one call.
+        block = wave[:n].reshape(self.cols, per)
+        idx = np.argmax(np.abs(block), axis=1)
+        v = block[np.arange(self.cols), idx] * (1.0 / max(self.peak, 0.02))
+        xs = ix + iw * (np.arange(self.cols, dtype=np.float32)
+                        / float(self.cols - 1))
+        ys = mid - np.clip(v, -1.0, 1.0) * (ih * 0.46)
+        pts = np.stack([xs, ys], axis=1)
+        trace = np.rint(np.stack([pts[:-1], pts[1:]], axis=1)).astype(np.int32)
+        return np.concatenate([frame, trace]) if len(frame) else trace
