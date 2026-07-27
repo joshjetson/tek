@@ -141,6 +141,8 @@ flat = sc.points()
 check("scope emits the renderer's segment format",
       flat.ndim == 3 and flat.shape[1:] == (2, 2) and flat.dtype == np.int32,
       (flat.shape, flat.dtype))
+check("scope draws NO box and no axis - only the trace",
+      len(flat) == sc.cols - 1, len(flat))
 check("scope sits in the lower right", sc.bx > W * 0.6 and sc.by > H * 0.6,
       (sc.bx, sc.by))
 check("scope is fully on screen",
@@ -153,16 +155,15 @@ check("scope does not overlap the clock panel",
 
 
 def deviation(pts, sc):
-    """How far the TRACE departs from the zero axis.
+    """How far the trace departs from where the zero axis would be.
 
-    Only the trace - the last cols-1 segments. Measuring all the points
-    includes the bezel, which sits at a constant +/-52 px and swamps the
-    signal, so every case reported 52.0 and the test could not tell silence
-    from a sine wave.
+    The scope has no bezel and no axis now - the whole output is the trace, so
+    every point counts. When it did have a bezel, measuring all points included
+    it at a constant +/-52 px and every case reported 52.0, so the test could
+    not tell silence from a sine wave.
     """
-    trace = pts[-(sc.cols - 1):]
     mid = sc.by + sc.bh * 0.5
-    return float(np.abs(trace[..., 1].astype(np.float32) - mid).max())
+    return float(np.abs(pts[..., 1].astype(np.float32) - mid).max())
 
 
 sil = hud.Scope(W, H)
@@ -218,45 +219,46 @@ print("    scope costs %.3f ms/frame" % ms)
 check("scope stays well inside the frame budget", ms < 3.0, "%.2f ms" % ms)
 
 # -- the landmark face panel -----------------------------------------------
+# Drawn the way the HEAD is drawn: an implicit field sliced into iso-contours
+# with the same _march the head uses. An earlier version drew the 68 landmarks
+# as a single-stroke outline, which is a different idiom entirely and looked
+# like clip-art beside the contoured head.
 fp = hud.FacePanel(W, H)
 empty = fp.points()
-check("face panel draws something when nobody is there", len(empty) > 4)
+check("nothing is drawn when nobody is there (no box, no placeholder)",
+      len(empty) == 0, len(empty))
 check("face panel sits in the upper left", fp.bx < W * 0.3 and fp.by < H * 0.3,
       (fp.bx, fp.by))
-check("face panel does not overlap the clock",
-      fp.bx + fp.bw < cx, (fp.bx + fp.bw, cx))
+check("face panel does not overlap the clock", fp.bx + fp.bw < cx,
+      (fp.bx + fp.bw, cx))
 
-# A synthetic but correctly-shaped set of 68 normalised landmarks.
-rng = np.random.RandomState(7)
-lm = np.column_stack([rng.uniform(0.35, 0.65, 68),
-                      rng.uniform(0.30, 0.70, 68)]).astype(np.float32)
+# A plausible 68-point face: wider than tall is wrong, so build a real oval.
+ang = np.linspace(0, 2 * np.pi, 68, endpoint=False)
+lm = np.column_stack([0.5 + 0.16 * np.cos(ang),
+                      0.5 + 0.22 * np.sin(ang)]).astype(np.float32)
 for _ in range(20):
     fp.update(lm)
 face = fp.points()
-check("a face draws more segments than an empty panel", len(face) > len(empty),
-      (len(face), len(empty)))
-check("every part of the face is connected (68 points -> 71 strokes)",
-      len(face) - len(empty) + 4 >= 60, len(face) - len(empty))
-check("the drawn face stays inside its box",
+check("a face produces contour rings, not a handful of strokes",
+      len(face) > 200, len(face))
+check("the face stays inside its panel",
       face[..., 0].min() >= fp.bx and face[..., 0].max() <= fp.bx + fp.bw
       and face[..., 1].min() >= fp.by and face[..., 1].max() <= fp.by + fp.bh,
-      (face[..., 0].min(), face[..., 0].max()))
+      (face[..., 0].min(), face[..., 0].max(),
+       face[..., 1].min(), face[..., 1].max()))
+check("no vertex lands on the panel border (that would be the grid edge "
+      "marching, which drew a hard rectangle)",
+      not (np.any(face[..., 0] <= fp.bx + 1) or np.any(face[..., 1] <= fp.by + 1)
+           or np.any(face[..., 0] >= fp.bx + fp.bw - 1)
+           or np.any(face[..., 1] >= fp.by + fp.bh - 1)))
+check("the head is taller than it is wide, like a head",
+      float(face[..., 1].ptp()) > float(face[..., 0].ptp()),
+      (face[..., 0].ptp(), face[..., 1].ptp()))
+check("it fills a decent share of the panel",
+      face[..., 1].ptp() > fp.bh * 0.6, face[..., 1].ptp())
 
-# Aspect must be preserved: a face squashed to the box is worse than a small
-# correct one.
-tall = np.column_stack([rng.uniform(0.45, 0.55, 68),
-                        rng.uniform(0.10, 0.90, 68)]).astype(np.float32)
-fp2 = hud.FacePanel(W, H)
-for _ in range(20):
-    fp2.update(tall)
-t = fp2.points()[len(empty) - 4:]
-wide_span = float(t[..., 0].max() - t[..., 0].min())
-tall_span = float(t[..., 1].max() - t[..., 1].min())
-check("a narrow tall face is not stretched to fill the box",
-      wide_span < tall_span, (wide_span, tall_span))
-
-# Smoothing: a landmark fit jitters every frame, and the panel is the only
-# moving thing in the corner, so the jitter is very visible.
+# Smoothing: a per-frame fit jitters, and this is the only moving thing in an
+# otherwise still corner.
 fp3 = hud.FacePanel(W, H, smooth=0.35)
 fp3.update(lm)
 first = fp3.pts.copy()
@@ -264,15 +266,27 @@ fp3.update(lm + 0.1)
 moved = float(np.abs(fp3.pts - first).max())
 check("landmarks are smoothed, not snapped", 0.001 < moved < 0.1, moved)
 
-check("losing the face returns to the empty state",
-      (fp3.update(None), len(fp3.points()))[1] == len(empty))
+fp3.update(None)
+check("losing the face clears the panel", len(fp3.points()) == 0)
 
+# Contouring is not free; it must be rate-limited, not run every frame.
+fp4 = hud.FacePanel(W, H, rebuild_hz=4.0)
+for _ in range(6):
+    fp4.update(lm)
+fp4.points()
 t0 = _t.time()
-for _ in range(300):
-    fp.points()
-ms = (_t.time() - t0) / 300 * 1000
-print("    face panel costs %.3f ms/frame" % ms)
-check("face panel stays inside the frame budget", ms < 3.0, "%.2f ms" % ms)
+for _ in range(200):
+    fp4.points()
+cached_ms = (_t.time() - t0) / 200 * 1000
+t0 = _t.time()
+fp4._build()
+build_ms = (_t.time() - t0) * 1000
+print("    face panel: %.3f ms/frame cached, %.0f ms per rebuild at %.0f Hz"
+      % (cached_ms, build_ms, 1.0 / fp4._period))
+check("cached frames are nearly free", cached_ms < 0.2, cached_ms)
+check("rebuilds are rate-limited, not per-frame",
+      build_ms / (1000.0 / (1.0 / fp4._period)) < 0.30,
+      "%.0f%% of a core" % (build_ms / (1000.0 / (1.0 / fp4._period)) * 100))
 
 print("HUD " + ("OK" if not FAIL else "FAILED: " + ", ".join(FAIL)))
 sys.exit(1 if FAIL else 0)

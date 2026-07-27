@@ -254,14 +254,10 @@ class Scope(object):
         iw, ih = self.bw - pad_x * 2, self.bh - pad_y * 2
         mid = iy + ih * 0.5
 
-        # The bezel and the axis never change; building them 30 times a second
-        # is pure waste.
-        if self._frame is None:
-            segs = box(self.bx, self.by, self.bw, self.bh, notch=7)
-            for k in range(0, iw, 14):
-                segs.append(((ix + k, mid), (ix + min(k + 7, iw), mid)))
-            self._frame = to_pts(segs)
-        frame = self._frame
+        # No bezel and no axis: the trace alone. A box around it made it read
+        # as a widget bolted onto the picture rather than part of it, and the
+        # only panel that needs isolating is the clock.
+        frame = np.zeros((0, 2, 2), np.int32)
 
         wave = self._triggered()
         per = max(1, self.window // self.cols)
@@ -315,70 +311,149 @@ _EDGE_A, _EDGE_B = _edge_index()
 
 
 class FacePanel(object):
-    """A vector face drawn from the camera's 68 facial landmarks.
+    """A vector face built the way the HEAD is built: an implicit field sliced
+    into iso-contours.
 
-    Not a reticle and not a stylised glyph that merely moves about - these are
-    the actual measured feature points of whoever is in front of the camera,
-    drawn as strokes. The same rendering the head uses, so it belongs on the
-    screen rather than sitting on it.
+    The first version drew the 68 landmarks as a single-stroke outline. It was
+    a different idiom entirely - the head, the neck and the ears are all level
+    sets of a smooth field, which is what gives them their layered look, and a
+    thin wireframe next to that reads as clip-art.
 
-    Landmarks are smoothed before drawing. A per-frame fit jitters by a pixel
-    or two constantly, which is invisible in a debug overlay and very obvious
-    when it is the only moving thing in the corner of a still image.
+    So the landmarks are turned into a FIELD instead: a dome over the face oval
+    with ridges along the brows and nose and hollows at the eyes and mouth,
+    exactly the shape of the main head's equation. It is then sliced with
+    `contour._march` - the same function the head uses, not a copy of it - so
+    the two cannot drift apart.
     """
 
-    def __init__(self, w, h, margin=26, width=196, height=200, smooth=0.35):
+    RES = 140                # field grid; the head uses 360 for the whole face
+    LEVELS = 15
+
+    def __init__(self, w, h, margin=26, width=210, height=214, smooth=0.35,
+                 rebuild_hz=4.0):
         self.w, self.h = w, h
         self.bx, self.by = margin, margin
         self.bw, self.bh = width, height
         self.alpha = smooth
         self.pts = None
-        self._frame = None
-        self._empty = None
+        self._out = np.zeros((0, 2, 2), np.int32)
+        self._last_build = 0.0
+        self._period = 1.0 / max(rebuild_hz, 0.5)
 
     def update(self, landmarks):
-        """Feed normalised 0..1 landmarks, or None when nobody is there."""
         if landmarks is None:
             self.pts = None
+            self._out = np.zeros((0, 2, 2), np.int32)
             return
         p = np.asarray(landmarks, dtype=np.float32)
         if self.pts is None or self.pts.shape != p.shape:
             self.pts = p
         else:
+            # Smoothed: a per-frame fit jitters constantly, and this is the
+            # only moving thing in the corner of an otherwise still image.
             self.pts += (p - self.pts) * self.alpha
 
-    def _bezel(self):
-        if self._frame is None:
-            self._frame = to_pts(box(self.bx, self.by, self.bw, self.bh, notch=7))
-        return self._frame
+    def _field(self, q):
+        """Landmarks -> a smooth scalar height field, same shape of equation as
+        the head: a dome, plus ridges, minus hollows."""
+        import cv2
+        n = self.RES
+        img_pts = np.rint(q * (n - 1)).astype(np.int32)
 
-    def points(self):
-        frame = self._bezel()
-        if self.pts is None:
-            # Nobody there. A dashed cross reads as "no signal" on an
-            # instrument, where an empty box just looks broken.
-            if self._empty is None:
-                cx = self.bx + self.bw * 0.5
-                cy = self.by + self.bh * 0.5
-                segs = []
-                for k in range(-30, 31, 12):
-                    segs.append(((cx + k, cy), (cx + min(k + 6, 30), cy)))
-                self._empty = to_pts(segs)
-            return np.concatenate([frame, self._empty])
+        def stroke(idx, closed, thick):
+            m = np.zeros((n, n), np.uint8)
+            poly = img_pts[idx].reshape(-1, 1, 2)
+            cv2.polylines(m, [poly], closed, 255, thick, cv2.LINE_AA)
+            # Distance from the stroke -> a smooth falloff, so features blend
+            # into the dome instead of cutting steps into it.
+            d = cv2.distanceTransform((m < 128).astype(np.uint8),
+                                      cv2.DIST_L2, 3)
+            # Wide falloff. Narrow ridges spike the field and the contours
+            # crowd into a blob around every feature; broad ones DEFORM the
+            # dome's contours, which is how the main head reads.
+            return np.exp(-(d / (n * 0.070)) ** 2).astype(np.float32)
 
-        # Fit the landmarks into the panel, preserving aspect: a face squashed
-        # to the box is worse than a smaller correct one.
+        # Dome over the whole face: the outer contours, equivalent to the
+        # head's skull term.
+        yy, xx = np.mgrid[0:n, 0:n].astype(np.float32) / (n - 1.0)
+        # Dome sized to FILL the grid, then the landmarks are placed on it -
+        # rather than sizing the dome from the landmarks and shrinking it to
+        # fit, which left the head small in a large empty panel.
+        # A head is markedly taller than wide. Deriving the width from the
+        # landmark span gave something close to a circle, because the 68 points
+        # are nearly as wide as they are tall - they stop at the brow.
+        r2 = ((xx - 0.5) / 0.34) ** 2 + ((yy - 0.5) / 0.47) ** 2
+        z = np.sqrt(np.clip(1.0 - r2, 0.0, 1.0)).astype(np.float32)
+
+        # Strengths chosen by rendering a grid of (width x strength) variants
+        # and looking. Narrow-and-strong spikes the field so contours crowd
+        # into a blob at every feature; wide-and-weak washes them out entirely.
+        g = 0.50
+        z += g * 1.00 * stroke(list(range(27, 31)), False, 2)   # nose bridge
+        z += g * 0.55 * stroke(list(range(31, 36)), False, 2)   # nostrils
+        z += g * 0.45 * stroke(list(range(17, 22)), False, 2)   # brow
+        z += g * 0.45 * stroke(list(range(22, 27)), False, 2)   # brow
+        z -= g * 0.80 * stroke(list(range(36, 42)), True, 1)    # eye
+        z -= g * 0.80 * stroke(list(range(42, 48)), True, 1)    # eye
+        z -= g * 0.65 * stroke(list(range(48, 60)), True, 1)    # lips
+        return z
+
+    def _build(self):
+        from .contour import _march
         p = self.pts
         x0, y0 = p[:, 0].min(), p[:, 1].min()
-        sx, sy = max(p[:, 0].ptp(), 1e-3), max(p[:, 1].ptp(), 1e-3)
-        pad = 16
-        iw, ih = self.bw - pad * 2, self.bh - pad * 2
-        k = min(iw / sx, ih / sy)
-        ox = self.bx + pad + (iw - sx * k) * 0.5
-        oy = self.by + pad + (ih - sy * k) * 0.5
+        sx = max(p[:, 0].ptp(), 1e-3)
+        sy = max(p[:, 1].ptp(), 1e-3)
+        # ONE scale for both axes. Normalising x and y independently squashes
+        # the face to fill a square grid, which turned an oval head into a
+        # circle - the contours were correct and the shape was wrong.
+        scale = max(sx, sy)
         q = np.empty_like(p)
-        q[:, 0] = ox + (p[:, 0] - x0) * k
-        q[:, 1] = oy + (p[:, 1] - y0) * k
+        q[:, 0] = (p[:, 0] - (x0 + sx * 0.5)) / scale * 0.62 + 0.5
+        # Pushed DOWN the dome. The 68-point set spans brow to chin with no
+        # cranium above it, so centring it on the head puts the eyes halfway up
+        # a forehead.
+        q[:, 1] = (p[:, 1] - (y0 + sy * 0.5)) / scale * 0.62 + 0.57
 
-        trace = np.rint(np.stack([q[_EDGE_A], q[_EDGE_B]], axis=1)).astype(np.int32)
-        return np.concatenate([frame, trace])
+        z = self._field(q)
+
+        # Preserve aspect when mapping the grid into the panel: a face squashed
+        # to the box is worse than a smaller correct one.
+        pad = 10
+        iw, ih = self.bw - pad * 2, self.bh - pad * 2
+        k = min(iw, ih)
+        ox = self.bx + pad + (iw - k) * 0.5
+        oy = self.by + pad + (ih - k) * 0.5
+        gx = ox + np.linspace(0.0, 1.0, self.RES, dtype=np.float32) * k
+        gy = oy + np.linspace(0.0, 1.0, self.RES, dtype=np.float32) * k
+
+        # Levels are taken from ZERO upward, not from the field minimum. The
+        # eye and lip terms are subtractive, so z.min() is negative, and a
+        # lowest level derived from it fell below the zero background - the
+        # mask then covered the whole grid and marched its border, drawing a
+        # hard rectangle around the panel that looked exactly like a bezel.
+        hi = float(z.max())
+        segs = []
+        for lev in np.linspace(hi * 0.10, hi * 0.985, self.LEVELS):
+            for poly in _march(z >= lev, gx, gy, min_raw=8, min_pts=3, eps=0.45):
+                if len(poly) < 2:
+                    continue
+                loop = np.vstack([poly, poly[:1]])
+                segs.append(np.stack([loop[:-1], loop[1:]], axis=1))
+        self._out = (np.rint(np.concatenate(segs)).astype(np.int32)
+                     if segs else np.zeros((0, 2, 2), np.int32))
+
+    def points(self):
+        if self.pts is None:
+            return self._out
+        now = time.time()
+        # Contouring is not free and the landmarks only arrive a few times a
+        # second anyway; rebuilding every frame would spend the budget on
+        # redrawing an identical picture.
+        if now - self._last_build >= self._period:
+            self._last_build = now
+            try:
+                self._build()
+            except Exception:
+                pass
+        return self._out
