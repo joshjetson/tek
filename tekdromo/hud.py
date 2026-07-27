@@ -57,6 +57,49 @@ _CHARS = {
     "A": [[(0.0, 1.0), (0.5, 0.0), (1.0, 1.0)], [(0.18, 0.62), (0.82, 0.62)]],
     "P": [[(0.0, 1.0), (0.0, 0.0), (1.0, 0.0), (1.0, 0.5), (0.0, 0.5)]],
     "M": [[(0.0, 1.0), (0.0, 0.0), (0.5, 0.55), (1.0, 0.0), (1.0, 1.0)]],
+    # The rest of the alphabet, for name labels. Angular rather than curved:
+    # a vector display draws strokes, and faking curves with many short
+    # segments costs beam time for a smoothness the phosphor bloom hides
+    # anyway.
+    "B": [[(0.0, 1.0), (0.0, 0.0), (0.75, 0.0), (1.0, 0.22), (0.75, 0.5),
+           (0.0, 0.5)], [(0.75, 0.5), (1.0, 0.75), (0.72, 1.0), (0.0, 1.0)]],
+    "C": [[(1.0, 0.2), (0.75, 0.0), (0.25, 0.0), (0.0, 0.28), (0.0, 0.72),
+           (0.25, 1.0), (0.75, 1.0), (1.0, 0.8)]],
+    "D": [[(0.0, 0.0), (0.68, 0.0), (1.0, 0.3), (1.0, 0.7), (0.68, 1.0),
+           (0.0, 1.0), (0.0, 0.0)]],
+    "E": [[(1.0, 0.0), (0.0, 0.0), (0.0, 1.0), (1.0, 1.0)],
+          [(0.0, 0.5), (0.72, 0.5)]],
+    "F": [[(1.0, 0.0), (0.0, 0.0), (0.0, 1.0)], [(0.0, 0.5), (0.7, 0.5)]],
+    "G": [[(1.0, 0.2), (0.75, 0.0), (0.25, 0.0), (0.0, 0.28), (0.0, 0.72),
+           (0.25, 1.0), (0.75, 1.0), (1.0, 0.72), (1.0, 0.55), (0.6, 0.55)]],
+    "H": [[(0.0, 0.0), (0.0, 1.0)], [(1.0, 0.0), (1.0, 1.0)],
+          [(0.0, 0.5), (1.0, 0.5)]],
+    "I": [[(0.2, 0.0), (0.8, 0.0)], [(0.5, 0.0), (0.5, 1.0)],
+          [(0.2, 1.0), (0.8, 1.0)]],
+    "J": [[(0.8, 0.0), (0.8, 0.75), (0.58, 1.0), (0.25, 1.0), (0.05, 0.8)]],
+    "K": [[(0.0, 0.0), (0.0, 1.0)], [(1.0, 0.0), (0.05, 0.52)],
+          [(0.35, 0.36), (1.0, 1.0)]],
+    "L": [[(0.0, 0.0), (0.0, 1.0), (1.0, 1.0)]],
+    "N": [[(0.0, 1.0), (0.0, 0.0), (1.0, 1.0), (1.0, 0.0)]],
+    "O": [[(0.25, 0.0), (0.75, 0.0), (1.0, 0.25), (1.0, 0.75), (0.75, 1.0),
+           (0.25, 1.0), (0.0, 0.75), (0.0, 0.25), (0.25, 0.0)]],
+    "Q": [[(0.25, 0.0), (0.75, 0.0), (1.0, 0.25), (1.0, 0.75), (0.75, 1.0),
+           (0.25, 1.0), (0.0, 0.75), (0.0, 0.25), (0.25, 0.0)],
+          [(0.62, 0.7), (1.0, 1.05)]],
+    "R": [[(0.0, 1.0), (0.0, 0.0), (0.8, 0.0), (1.0, 0.26), (0.8, 0.5),
+           (0.0, 0.5)], [(0.45, 0.5), (1.0, 1.0)]],
+    "S": [[(1.0, 0.16), (0.72, 0.0), (0.25, 0.0), (0.0, 0.25), (0.25, 0.5),
+           (0.75, 0.5), (1.0, 0.75), (0.72, 1.0), (0.25, 1.0), (0.0, 0.85)]],
+    "T": [[(0.0, 0.0), (1.0, 0.0)], [(0.5, 0.0), (0.5, 1.0)]],
+    "U": [[(0.0, 0.0), (0.0, 0.75), (0.25, 1.0), (0.75, 1.0), (1.0, 0.75),
+           (1.0, 0.0)]],
+    "V": [[(0.0, 0.0), (0.5, 1.0), (1.0, 0.0)]],
+    "W": [[(0.0, 0.0), (0.2, 1.0), (0.5, 0.45), (0.8, 1.0), (1.0, 0.0)]],
+    "X": [[(0.0, 0.0), (1.0, 1.0)], [(1.0, 0.0), (0.0, 1.0)]],
+    "Y": [[(0.0, 0.0), (0.5, 0.52), (1.0, 0.0)], [(0.5, 0.52), (0.5, 1.0)]],
+    "Z": [[(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]],
+    "?": [[(0.05, 0.25), (0.25, 0.0), (0.75, 0.0), (1.0, 0.25), (0.5, 0.55),
+           (0.5, 0.7)], [(0.5, 0.92), (0.5, 1.0)]],
 }
 
 
@@ -338,9 +381,13 @@ class FacePanel(object):
         self.pts = None
         self._out = np.zeros((0, 2, 2), np.int32)
         self._last_build = 0.0
+        self.name = "UNKNOWN"
+        self._label_key = None
+        self._label = np.zeros((0, 2, 2), np.int32)
         self._period = 1.0 / max(rebuild_hz, 0.5)
 
-    def update(self, landmarks):
+    def update(self, landmarks, name=None):
+        self.name = (name or "UNKNOWN").upper()
         if landmarks is None:
             self.pts = None
             self._out = np.zeros((0, 2, 2), np.int32)
@@ -396,6 +443,21 @@ class FacePanel(object):
         z -= g * 0.80 * stroke(list(range(36, 42)), True, 1)    # eye
         z -= g * 0.80 * stroke(list(range(42, 48)), True, 1)    # eye
         z -= g * 0.65 * stroke(list(range(48, 60)), True, 1)    # lips
+
+        # EARS. The 68-point set has none - it stops at the jaw - so they are
+        # placed anatomically rather than measured: spanning brow line to nose
+        # base, at the sides of the dome. Same rule the main head uses, where
+        # the ears are their own lateral field for exactly this reason.
+        brow_y = float(q[[19, 24], 1].mean())
+        nose_y = float(q[33, 1])
+        ear_cy = (brow_y + nose_y) * 0.5
+        # Placed ON the dome's edge (ax = 0.34), not inside it. Sitting inside
+        # they read as marks on the cheeks; they have to push the silhouette
+        # outward to be ears at all.
+        for side in (-1.0, 1.0):
+            ex = 0.5 + side * 0.345
+            r = (((xx - ex) / 0.055) ** 2 + ((yy - ear_cy) / 0.100) ** 2)
+            z += 0.42 * np.exp(-r).astype(np.float32)
         return z
 
     def _build(self):
@@ -421,7 +483,7 @@ class FacePanel(object):
         # to the box is worse than a smaller correct one.
         pad = 10
         iw, ih = self.bw - pad * 2, self.bh - pad * 2
-        k = min(iw, ih)
+        k = min(iw, ih - 20)
         ox = self.bx + pad + (iw - k) * 0.5
         oy = self.by + pad + (ih - k) * 0.5
         gx = ox + np.linspace(0.0, 1.0, self.RES, dtype=np.float32) * k
@@ -443,6 +505,19 @@ class FacePanel(object):
         self._out = (np.rint(np.concatenate(segs)).astype(np.int32)
                      if segs else np.zeros((0, 2, 2), np.int32))
 
+    def _label_points(self):
+        """The name, centred under the face. Rebuilt only when it changes."""
+        if self._label_key == self.name:
+            return self._label
+        cw, ch = 11, 16
+        segs, w = text(self.name, 0, 0, cw, ch)
+        ox = self.bx + (self.bw - w) * 0.5
+        oy = self.by + self.bh - ch - 2
+        self._label = to_pts([((a[0] + ox, a[1] + oy), (b[0] + ox, b[1] + oy))
+                              for a, b in segs])
+        self._label_key = self.name
+        return self._label
+
     def points(self):
         if self.pts is None:
             return self._out
@@ -456,4 +531,5 @@ class FacePanel(object):
                 self._build()
             except Exception:
                 pass
-        return self._out
+        lab = self._label_points()
+        return np.concatenate([self._out, lab]) if len(lab) else self._out

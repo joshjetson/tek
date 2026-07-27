@@ -62,6 +62,13 @@ class Tracker:
         # downstream needs to know the camera's resolution.
         self.landmarks = None
         self.landmarks_at = 0.0
+        self.name = None            # who the recogniser thinks this is
+        self.face_crop = None       # greyscale crop, for enrolment
+        try:
+            from . import recog
+            self._recog = recog.Recogniser()
+        except Exception:
+            self._recog = None
         self._facemark = self._load_facemark() if landmarks else None
         self.last_frame = None
         self.last_faces = 0
@@ -154,6 +161,9 @@ class Tracker:
         # biggest face wins - the nearest person is the one being addressed
         x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
         self._fit_landmarks(small, (x, y, fw, fh), now)
+        self._identify(g, (x, y, fw, fh))
+        if self.detections % 40 == 0:
+            self._check_gallery()
         cx = (x + fw * 0.5) / small.shape[1]
         cy = (y + fh * 0.5) / small.shape[0]
         nx = cx * 2.0 - 1.0
@@ -189,6 +199,55 @@ class Tracker:
         with self._lock:
             self.landmarks = pts
             self.landmarks_at = now
+
+    def _check_gallery(self):
+        """Reload if someone has been enrolled since we started.
+
+        Polled rather than signalled: the enrolling process is the CLI, the
+        recogniser lives in the display, and a directory mtime is a cheaper
+        channel between them than another socket.
+        """
+        try:
+            from . import recog
+            m = os.path.getmtime(recog.GALLERY)
+        except OSError:
+            return
+        if m != getattr(self, "_gallery_mtime", None):
+            self._gallery_mtime = m
+            if self._recog is not None:
+                n = self._recog.reload()
+                print("recogniser: %d samples, %s"
+                      % (n, ", ".join(recog.people()) or "nobody"), flush=True)
+
+    def _identify(self, gray_small, rect):
+        """Name the detected face, from the same greyscale the detector used."""
+        if self._recog is None:
+            return
+        x, y, w, h = rect
+        crop = gray_small[max(0, y):y + h, max(0, x):x + w]
+        if crop.size < 100:
+            return
+        try:
+            name, _dist = self._recog.predict(crop)
+        except Exception:
+            name = None
+        with self._lock:
+            self.face_crop = crop
+            self.name = name
+
+    def who(self):
+        with self._lock:
+            return self.name
+
+    def crop(self):
+        with self._lock:
+            return None if self.face_crop is None else self.face_crop.copy()
+
+    def relearn(self):
+        """Pick up newly enrolled faces without a restart."""
+        if self._recog is not None:
+            return self._recog.reload()
+        return 0
 
     def face_points(self, hold=1.5):
         """Latest landmarks, or None if stale. Never blocks."""

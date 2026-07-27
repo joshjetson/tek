@@ -36,6 +36,10 @@ WATCH_STABLE = 2.0
 SNAPSHOT = os.path.join(os.path.expanduser("~/.cache/tekdromo"), "seen.jpg")
 # Refresh the on-disk frame this often while someone is in view.
 SNAPSHOT_EVERY = 8.0
+# Face crops are written faster: `tek face enrol` needs a handful of distinct
+# captures, and one every 8s would make enrolling take a minute and a half.
+CROP_EVERY = 1.5
+FACE_CROP = os.path.join(os.path.expanduser("~/.cache/tekdromo"), "crop.png")
 
 # Process start, captured at import so the startup report measures what the
 # user actually waits for - from exec to a picture - not from some later point.
@@ -265,6 +269,7 @@ class Display:
         stale or missing image is worse than useless.
         """
         last_shot = 0.0
+        last_crop = 0.0
         while self.running:
             if not self._event_q:
                 now = time.time()
@@ -273,6 +278,16 @@ class Display:
                 if self.cam is not None and now - last_shot > SNAPSHOT_EVERY:
                     self.cam.snapshot(SNAPSHOT)
                     last_shot = now
+                if self.cam is not None and now - last_crop > CROP_EVERY:
+                    # The display owns the camera, so `tek face enrol` has no
+                    # other way to get a face crop.
+                    try:
+                        crop = self.cam.crop()
+                        if crop is not None and crop.size:
+                            cv2.imwrite(FACE_CROP, crop)
+                    except Exception:
+                        pass
+                    last_crop = now
                 time.sleep(0.25)
                 continue
             ev = self._event_q.pop(0)
@@ -396,7 +411,8 @@ class Display:
                     # None when nobody is there, which the panel draws as a
                     # "no signal" cross rather than an empty box.
                     self.face_panel.update(
-                        self.cam.face_points() if self.cam is not None else None)
+                        self.cam.face_points() if self.cam is not None else None,
+                        self.cam.who() if self.cam is not None else None)
                     panels.append(self.face_panel.points())
                 if panels:
                     pts = np.concatenate([pts] + panels) if len(pts) \

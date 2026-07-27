@@ -116,6 +116,11 @@ def main(argv=None):
     p.add_argument("--secs", type=float, default=None, help="tone length")
     p.add_argument("--now", action="store_true", help="send one immediately")
 
+    p = sub.add_parser("face", help="who the camera recognises")
+    p.add_argument("action", choices=["list", "enrol", "enroll", "forget"])
+    p.add_argument("name", nargs="?")
+    p.add_argument("--samples", type=int, default=10)
+
     sub.add_parser("status", help="service state")
     sub.add_parser("voices", help="which voices work here")
     p = sub.add_parser("listen", help="print mouth frames as they are published")
@@ -254,6 +259,57 @@ def main(argv=None):
                  (r.get("amp") or 0) * 100))
         print("  sent       %s" % r.get("sent"))
         print("  idle for   %.0fs" % (r.get("idle") or 0))
+        return 0
+
+    if a.cmd == "face":
+        import time as _time
+        from .. import recog
+        if a.action == "list":
+            ppl = recog.people()
+            if not ppl:
+                print("  nobody enrolled - every face shows as UNKNOWN")
+            for n in ppl:
+                print("  %-14s %d samples" % (n, len(recog.samples(n))))
+            return 0
+        if not a.name:
+            sys.stderr.write("need a name\n")
+            return 1
+        name = a.name.strip().upper()
+        if a.action == "forget":
+            import shutil
+            shutil.rmtree(os.path.join(recog.GALLERY, name), ignore_errors=True)
+            print("  forgot %s" % name)
+            return 0
+
+        crop = os.path.expanduser("~/.cache/tekdromo/crop.png")
+        print("  enrolling %s - look at the camera and move your head a "
+              "little" % name)
+        import cv2
+        got, seen, t0 = 0, None, _time.time()
+        while got < a.samples and _time.time() - t0 < 90:
+            try:
+                m = os.path.getmtime(crop)
+            except OSError:
+                _time.sleep(0.5)
+                continue
+            # Only take a crop we have not already taken. Without this it saves
+            # the same picture ten times and the recogniser learns one pose.
+            if m == seen:
+                _time.sleep(0.3)
+                continue
+            seen = m
+            g = cv2.imread(crop, cv2.IMREAD_GRAYSCALE)
+            if g is None or g.size < 100:
+                continue
+            recog.save_sample(name, g)
+            got += 1
+            print("    %d/%d" % (got, a.samples))
+        if not got:
+            sys.stderr.write("  no face crops appeared - is anyone in front "
+                             "of the camera?\n")
+            return 1
+        print("  enrolled %s with %d samples; the display picks it up within "
+              "a few seconds" % (name, got))
         return 0
 
     if a.cmd == "status":
