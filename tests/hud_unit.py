@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 
 from tekdromo import hud
+from tekdromo.voice import pcm
 
 W, H = 1024, 600
 FAIL = []
@@ -168,7 +169,7 @@ check("scope emits the renderer's segment format",
       flat.ndim == 3 and flat.shape[1:] == (2, 2) and flat.dtype == np.int32,
       (flat.shape, flat.dtype))
 check("scope draws NO box and no axis - only the trace",
-      len(flat) == sc.cols - 1, len(flat))
+      len(flat) == (sc.cols - 1) * 2 + sc.cols, len(flat))
 check("scope sits in the lower right", sc.bx > W * 0.6 and sc.by > H * 0.6,
       (sc.bx, sc.by))
 check("scope is fully on screen",
@@ -209,7 +210,11 @@ faint = hud.Scope(W, H)
 # Push repeatedly. The peak decays 0.9 per push and audio arrives ~50 times a
 # second, so a single push leaves the tracker still sitting on its initial
 # value - which is not how it is ever fed in practice.
-for _ in range(60):
+# Ten seconds' worth. The peak decays 0.995 per push - deliberately slow, so
+# the trace does not pump on every transient - which at 50 frames a second is
+# about 0.78 per second, so a quiet passage takes several seconds to bring the
+# gain up. Sixty pushes is barely one second and the gain has hardly moved.
+for _ in range(500):
     faint.push((np.sin(2 * np.pi * 200 * t[:320]) * 300).astype(np.int16))
 faint_dev = deviation(faint.points(), faint)
 check("a quiet signal becomes visible once the gain settles",
@@ -231,8 +236,31 @@ trig = hud.Scope(W, H)
 trig.push((np.sin(2 * np.pi * 200 * t) * 12000).astype(np.int16))
 a1 = trig.points()
 a2 = trig.points()
-check("the same buffer draws the same trace (stable trigger)",
-      np.array_equal(a1, a2))
+check("the same buffer draws the same trace", np.array_equal(a1, a2))
+
+# The window must be long enough to span the gaps between words. At 32 ms the
+# trace was flat most of the time during real speech, because a glance lands
+# inside a pause: two captures 1.2s apart in one sentence gave 44 lit rows then
+# 3. Anything shorter than ~100 ms has that problem.
+# History length is the thing that was wrong: a 32ms oscilloscope window was
+# flat almost every time anyone looked, because speech is mostly gaps.
+hist_s = trig.cols * pcm.FRAME_MS / 1000.0
+check("the scope holds at least 1.5s of history", hist_s >= 1.5,
+      "%.1f s" % hist_s)
+
+# Speech with realistic gaps: a burst then silence, repeatedly. Every frame
+# during the burst-and-gap pattern should still show something.
+gappy = hud.Scope(W, H)
+flatcount = 0
+for i in range(40):
+    loud = (i % 8) < 3          # ~200ms of speech then ~330ms of gap
+    chunk = ((np.sin(2 * np.pi * 200 * t[:320]) * 9000) if loud
+             else np.zeros(320)).astype(np.int16)
+    gappy.push(chunk)
+    if i > 8 and deviation(gappy.points(), gappy) < 6:
+        flatcount += 1
+check("the trace does not go flat during the gaps between words",
+      flatcount == 0, "%d flat frames of 31" % flatcount)
 
 # Budget. A decoration must not eat the frame: the first version cost 30ms.
 import time as _t

@@ -239,57 +239,48 @@ class Clock(object):
 
 
 class Scope(object):
-    """An oscilloscope trace of whatever is coming out of the speaker.
+    """A scrolling waveform of whatever is coming out of the speaker.
 
     Fed from PulseAudio's sink MONITOR rather than from the voice service, so
-    it shows *everything the machine plays* - speech, music, anything else -
-    with no cooperation from whatever produced it. One source, every case.
+    it shows everything the machine plays - speech, music, anything else - with
+    no cooperation from whatever produced it.
 
-    A vector display genuinely is an oscilloscope, so this is about the most
-    native thing the panel could show.
+    It keeps a HISTORY OF LEVELS, one per 20 ms frame, and draws it mirrored
+    about the centre. That is not what it was first: it began as a true
+    oscilloscope showing the last 32 ms of samples, and it was flat almost
+    every time anyone looked at it. Speech is mostly gaps - the pauses between
+    words are far longer than 32 ms - so a glance nearly always landed in
+    silence. Widening the window to 200 ms did not fix it either; the gaps are
+    longer than that too.
+
+    Measured with the feeder instrumented: audio was arriving the whole time at
+    50 frames a second with peaks of 0.14, while the trace showed nothing. The
+    data was never the problem, the time span was.
+
+    Two and a half seconds of history always has something in it, and it is
+    also simply more useful: you can see the shape of a sentence or the beat of
+    a track, which a 32 ms window cannot show by construction.
     """
 
-    def __init__(self, w, h, margin=26, width=300, height=104, cols=128,
-                 window=512):
+    def __init__(self, w, h, margin=26, width=300, height=104, cols=150):
         self.w, self.h = w, h
         self.bw, self.bh = width, height
         self.bx = w - margin - width
         self.by = h - margin - height
         self.cols = cols
-        self.window = window
-        self.buf = np.zeros(window * 4, np.float32)
+        self.levels = np.zeros(cols, np.float32)
         # Slow-decaying peak. Speech and music differ by tens of dB, so a fixed
-        # gain shows either a flat line or a clipped mess; tracking the peak and
-        # letting it fall slowly keeps quiet passages visible without the trace
-        # jumping about on every transient.
+        # gain shows either a flat line or a clipped mess.
         self.peak = 0.05
-        self._frame = None
 
     def push(self, samples):
-        s = np.asarray(samples, dtype=np.float32) / 32767.0
+        s = np.asarray(samples, dtype=np.float32) / 32768.0
         if not len(s):
             return
-        n = min(len(s), len(self.buf))
-        self.buf = np.roll(self.buf, -n)
-        self.buf[-n:] = s[-n:]
-        self.peak = max(float(np.abs(s).max()), self.peak * 0.90)
-
-    def _triggered(self):
-        """A window starting at a rising zero crossing.
-
-        Without a trigger the waveform slides sideways every frame and reads as
-        noise; with one it stands still, which is what makes a scope legible.
-
-        Vectorised. The obvious Python loop over candidate offsets, together
-        with a per-column argmax below, cost 30 ms a frame - the entire budget
-        at 30 fps, for a decoration.
-        """
-        w, half = self.window, self.window // 2
-        seg = self.buf[-(w + half):]
-        head = seg[:half]
-        rising = np.nonzero((head[:-1] <= 0.0) & (head[1:] > 0.0))[0]
-        i = int(rising[0]) if len(rising) else 0
-        return seg[i:i + w]
+        lvl = float(np.abs(s).max())
+        self.levels[:-1] = self.levels[1:]      # scroll left
+        self.levels[-1] = lvl
+        self.peak = max(lvl, self.peak * 0.995)
 
     def points(self):
         pad_x, pad_y = 12, 10
@@ -297,26 +288,21 @@ class Scope(object):
         iw, ih = self.bw - pad_x * 2, self.bh - pad_y * 2
         mid = iy + ih * 0.5
 
-        # No bezel and no axis: the trace alone. A box around it made it read
-        # as a widget bolted onto the picture rather than part of it, and the
-        # only panel that needs isolating is the clock.
-        frame = np.zeros((0, 2, 2), np.int32)
-
-        wave = self._triggered()
-        per = max(1, self.window // self.cols)
-        n = self.cols * per
-        # Decimate by bucket PEAK, not by sampling: taking every Nth sample
-        # drops the transients that carry the shape, so a drum hit vanishes.
-        # Reshape + argmax along an axis does all the buckets in one call.
-        block = wave[:n].reshape(self.cols, per)
-        idx = np.argmax(np.abs(block), axis=1)
-        v = block[np.arange(self.cols), idx] * (1.0 / max(self.peak, 0.02))
+        v = np.clip(self.levels * (1.0 / max(self.peak, 0.02)), 0.0, 1.0)
         xs = ix + iw * (np.arange(self.cols, dtype=np.float32)
                         / float(self.cols - 1))
-        ys = mid - np.clip(v, -1.0, 1.0) * (ih * 0.46)
-        pts = np.stack([xs, ys], axis=1)
-        trace = np.rint(np.stack([pts[:-1], pts[1:]], axis=1)).astype(np.int32)
-        return np.concatenate([frame, trace]) if len(frame) else trace
+        half = v * (ih * 0.46)
+        # Mirrored about the centre - an envelope drawn only upward reads as a
+        # bar chart, not as sound.
+        top = np.stack([xs, mid - half], axis=1)
+        bot = np.stack([xs, mid + half], axis=1)
+        segs = np.concatenate([
+            np.stack([top[:-1], top[1:]], axis=1),
+            np.stack([bot[:-1], bot[1:]], axis=1),
+            # The vertical joining each pair, which is what gives it body.
+            np.stack([top, bot], axis=1),
+        ])
+        return np.rint(segs).astype(np.int32)
 
 
 # The 68-point iBUG layout, as polylines. Closed loops for the eyes and lips;
