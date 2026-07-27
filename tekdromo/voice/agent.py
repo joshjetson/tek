@@ -46,18 +46,13 @@ WHAT HAPPENED: %(what)s
 Time: %(when)s. Faces detected: %(faces)d.
 %(history)s
 %(people)s
-
-Read the image file at %(image)s - that is what the camera can see right now.
-The camera is fixed and wide, so people are often at the edge of frame, partly
-cut off, or lit from behind. That is normal; judge what you can.
-
+%(look)s
 %(lean)s
 
-If you speak: one or two short sentences, warm and specific to what you can
-actually see, the way someone in the room would say it. No emoji, no
-formatting, no stage directions, no describing the photo back - it is read
-aloud exactly as written. Use a name only if the description above makes you
-reasonably confident.
+If you speak: one or two short sentences, warm and specific, the way someone in
+the room would say it. No emoji, no formatting, no stage directions, no
+describing the photo back - it is read aloud exactly as written. Use a name
+only if the description above makes you reasonably confident.
 
 Reply with EXACTLY the single word %(silence)s to say nothing.
 Otherwise reply with ONLY the words to speak."""
@@ -78,6 +73,18 @@ name if you can tell who it is.
 
 Stay silent only if you greeted them very recently, if the frame is too unclear
 to tell anything, or if what you would say adds nothing.""",
+
+    "speech": u"""Someone has just SPOKEN TO YOU, out loud, using your wake
+word. Answer them. This is a conversation, not a decision about whether to
+interrupt one - staying silent when a person has directly addressed you is the
+one thing that makes the device feel broken.
+
+Answer in one or two spoken sentences. If you did not understand, say so
+plainly and ask them to repeat it, rather than guessing or saying nothing.
+Only stay silent if the words are clearly not addressed to you at all.
+
+Remember the transcript comes from a small speech recogniser in a room, so it
+may be slightly wrong. Read through obvious mishearings.""",
 
     "default": u"""Decide whether speaking would be welcome. Prefer silence if
 you spoke recently or would only be restating what is obvious.""",
@@ -171,6 +178,19 @@ class ClaudeBrain(Brain):
             hist += " Recently you said: " + "; ".join(
                 '"%s"' % r for r in event["recent"][-3:])
         kind = event.get("kind", "default")
+        # Only ask it to open the camera frame when there IS one. The image
+        # instruction used to be unconditional, so an event with no picture
+        # still spent a Read tool call - and a round trip - discovering that
+        # "(no image available)" is not a file. That is pure latency on the
+        # path that matters most: answering someone who just spoke.
+        image = event.get("image")
+        look = ("\nRead the image file at %s - that is what the camera can see "
+                "right now.\nThe camera is fixed and wide, so people are often "
+                "at the edge of frame, partly\ncut off, or lit from behind. "
+                "That is normal; judge what you can.\n" % image
+                if image else
+                "\nYou have no picture of the room this time; go on what you "
+                "were told above.\n")
         return PROMPT % {
             "lean": LEAN.get(kind, LEAN["default"]),
             "what": event.get("what", "someone appeared"),
@@ -178,7 +198,7 @@ class ClaudeBrain(Brain):
             "faces": event.get("faces", 0),
             "history": hist,
             "people": people_notes(),
-            "image": event.get("image", "(no image available)"),
+            "look": look,
             "silence": SILENCE,
         }
 

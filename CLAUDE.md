@@ -65,6 +65,31 @@ If you change the brain: it must run in a NEUTRAL cwd. Running it in this
 project puts CLAUDE.md in scope, so it learns it has a voice and may speak for
 itself as well as returning words to speak.
 
+## Audio traps
+
+* **The speaker "randomly disconnecting" is almost always PulseAudio.** Its
+  default `exit-idle-time` is 20 s, so with no client connected the daemon
+  exits and takes A2DP with it; the next client autospawns a new one. 96
+  daemon restarts were logged in one day. Now `-1` in
+  `/etc/pulse/daemon.conf`. Check with `pulseaudio --dump-conf | grep
+  exit-idle` before suspecting BlueZ.
+* **Never trust the PulseAudio default source.** The mic is inside the webcam,
+  so a camera replug moves the default to the Tegra onboard input, which has
+  nothing plugged into it, and it never moves back. Use
+  `io.working_source()`, which probes for a *varying* signal — a dead input is
+  not silent, it is constant.
+* **Never use `@DEFAULT_MONITOR@`.** PulseAudio resolves it once, at stream
+  creation, and never moves the stream. The display starts before the speaker
+  connects, so it binds to the analog monitor and stays there — a flat
+  waveform panel on every boot. Use `io.default_monitor()` and re-check it.
+* **Do not probe audio devices on a timer.** Probing opens and kills a
+  recorder on every candidate. Cache it — `working_source` invalidates on the
+  device list changing, which is the only thing that can alter the answer.
+* **`abs()` on int16 overflows at -32768**, so a railed mic reports a healthy
+  amplitude. Convert to int32 first.
+* **`parec` stdout `read(n)` blocks forever** if the source never delivers n
+  bytes, which looks exactly like a hung script.
+
 ## Environment traps
 
 * **`OPENBLAS_CORETYPE=ARMV8` is mandatory.** Without it `import numpy` and

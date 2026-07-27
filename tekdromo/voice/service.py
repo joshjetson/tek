@@ -221,6 +221,11 @@ class VoiceService(object):
         # model call. Deliberately generous by default.
         self.brain = agent.load(brain_model)
         self.watching = True
+        # The ear, if there is a microphone. Separate switch from `watching`:
+        # "stop watching me" and "stop listening to me" are different requests.
+        self.listening = True
+        self.ears = None
+        self.mic = None               # PulseAudio source; None = the default
         self.cooldown = float(cooldown)
         self.last_event = 0.0
         self.last_spoke = 0.0
@@ -301,11 +306,37 @@ class VoiceService(object):
             if "seconds" in msg:
                 self.latency = max(0.0, float(msg["seconds"]))
             return {"ok": True, "latency": round(self.latency, 3)}
+        # "ears", not "listen": `tek listen` already means "print the mouth
+        # frames as they are published", and two different meanings for one
+        # word in the same tool is a trap for whoever reads it next.
+        if cmd == "ears":
+            if "on" in msg:
+                self.listening = bool(msg["on"])
+                if self.listening and (self.ears is None
+                                       or not self.ears.alive()):
+                    self.start_ears()
+                elif not self.listening and self.ears is not None:
+                    self.ears.stop()
+                    self.ears = None
+            st = {"ok": True, "listening": self.listening,
+                  "wake_words": None}
+            try:
+                from . import stt
+                st["wake_words"] = stt.WAKE_WORDS
+            except Exception:
+                pass
+            if self.ears is not None:
+                st.update(self.ears.state())
+            return st
         if cmd == "status":
-            return {"ok": True, "voice": self.voice.name,
-                    "latency": round(self.latency, 3),
-                    "rate": self.voice.rate, "speaking": self.speaking,
-                    "spoken": self.spoken, "load_time": round(self.load_time, 2)}
+            st = {"ok": True, "voice": self.voice.name,
+                  "latency": round(self.latency, 3),
+                  "rate": self.voice.rate, "speaking": self.speaking,
+                  "spoken": self.spoken, "load_time": round(self.load_time, 2),
+                  "watching": self.watching, "listening": self.listening}
+            if self.ears is not None:
+                st["ears"] = self.ears.state()
+            return st
         if cmd == "ping":
             return {"ok": True}
         return {"ok": False, "error": "unknown command %r" % cmd}
@@ -364,16 +395,28 @@ class VoiceService(object):
         never wait for anything.
         """
         self.events_seen += 1
-        if not self.watching:
-            return {"ok": True, "acted": False, "reason": "watching is off"}
         now = time.time()
-        if now - self.last_event < self.cooldown:
-            return {"ok": True, "acted": False, "reason": "cooldown",
-                    "next_in": round(self.cooldown - (now - self.last_event), 1)}
-        # Departures are recorded but never spoken about: announcing that
-        # someone has left, to an empty room, is talking to nobody.
-        if ev.get("kind") == "departure":
-            return {"ok": True, "acted": False, "reason": "departure"}
+        kind = ev.get("kind")
+
+        if kind == "speech":
+            # Somebody used the wake word and asked something. This deliberately
+            # skips the cooldown: that exists to stop the CAMERA remarking on an
+            # ordinary evening, and applying it here would mean ignoring a
+            # person who spoke directly to us - which reads as broken, not as
+            # restraint. Its own switch, because "stop watching me" and "stop
+            # listening to me" are different requests.
+            if not self.listening:
+                return {"ok": True, "acted": False, "reason": "listening is off"}
+        else:
+            if not self.watching:
+                return {"ok": True, "acted": False, "reason": "watching is off"}
+            if now - self.last_event < self.cooldown:
+                return {"ok": True, "acted": False, "reason": "cooldown",
+                        "next_in": round(self.cooldown - (now - self.last_event), 1)}
+            # Departures are recorded but never spoken about: announcing that
+            # someone has left, to an empty room, is talking to nobody.
+            if kind == "departure":
+                return {"ok": True, "acted": False, "reason": "departure"}
         self.last_event = now
         t = threading.Thread(target=self._consider, args=(ev,))
         t.daemon = True
@@ -550,11 +593,29 @@ class VoiceService(object):
                     "synth": round(state["synth"], 2), "chunks": len(parts),
                     "voice": v.name}
 
+    def start_ears(self, device=None):
+        """Begin listening, if there is anything to listen with.
+
+        Failure here is deliberately not fatal. A box with no microphone, or
+        without the Vosk model downloaded, must still speak and still answer
+        the camera - the ear is an addition, not a prerequisite.
+        """
+        try:
+            from . import ears as _ears
+            self.ears = _ears.Ears(self, device=device or self.mic).start()
+            return True
+        except Exception:
+            traceback.print_exc()
+            print("voice: no ear (continuing without one)", flush=True)
+            return False
+
     def run(self):
         self.server.start()
         k = threading.Thread(target=self._keepalive_loop)
         k.daemon = True
         k.start()
+        if self.listening:
+            self.start_ears()
         try:
             while True:
                 time.sleep(3600)
@@ -584,6 +645,13 @@ def main(argv=None):
                          "PulseAudio cannot see a Bluetooth speaker's own "
                          "buffer, so if the face still leads the sound, add it "
                          "here (e.g. 0.15).")
+    ap.add_argument("--no-ears", action="store_true",
+                    help="do not listen. The microphone is never opened at "
+                         "all, which is a stronger statement than a flag that "
+                         "merely ignores what it hears.")
+    ap.add_argument("--mic", default=None,
+                    help="PulseAudio SOURCE name. Default is whatever pactl "
+                         "calls the default source.")
     ap.add_argument("--say", default=None,
                     help="speak once and exit, without starting the service")
     a = ap.parse_args(argv)
@@ -600,8 +668,11 @@ def main(argv=None):
             sink.write(f)
         sink.close()
         return 0
-    VoiceService(a.voice, a.device, a.socket, a.latency_trim,
-                 a.brain_model, a.cooldown, a.keepalive).run()
+    svc = VoiceService(a.voice, a.device, a.socket, a.latency_trim,
+                       a.brain_model, a.cooldown, a.keepalive)
+    svc.listening = not a.no_ears
+    svc.mic = a.mic
+    svc.run()
     return 0
 
 

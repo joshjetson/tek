@@ -140,16 +140,42 @@ def heard_wake(text):
     return any(w in t for w in WAKE_WORDS)
 
 
+# What the FREE decoder tends to produce where the wake word was. It has 200k
+# words to choose from, so it mishears far more often than the grammar - which
+# can only pick between four phrases and therefore matched perfectly. Observed
+# in the room: "hey tech" came back as "hate tech", and the whole thing was
+# then handed on as the command.
+_WAKE_TAIL = ("tek", "tech", "tec", "tekk", "take", "tach")
+_WAKE_HEAD = ("hey", "hi", "hay", "hate", "eight", "ok", "okay", "a")
+
+
 def strip_wake(text):
     """Remove the wake word from the front of a command.
 
     "hey tek what time is it" -> "what time is it". Without this the wake word
     ends up in whatever the request is passed to, which reads oddly and wastes
     context.
+
+    The exact match is tried first. It is not enough on its own: this is only
+    ever called when the WAKE GRAMMAR has already fired, so the wake word was
+    definitely said - but the free decoder that produced `text` may have
+    written it down as something else. So a near miss is stripped too, on the
+    evidence of the token that follows.
     """
     t = (text or "").strip()
     low = t.lower()
     for w in sorted(WAKE_WORDS, key=len, reverse=True):
         if low.startswith(w):
             return t[len(w):].strip(" ,.")
+
+    words = t.split()
+    def bare(i):
+        return words[i].lower().strip(",.!?") if i < len(words) else ""
+
+    # "<something> tek ..." - the give-away is the second token.
+    if len(words) >= 2 and bare(1) in _WAKE_TAIL and bare(0) in _WAKE_HEAD:
+        return " ".join(words[2:]).strip(" ,.")
+    # "tek ..." - the greeting itself was swallowed.
+    if words and bare(0) in _WAKE_TAIL:
+        return " ".join(words[1:]).strip(" ,.")
     return t

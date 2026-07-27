@@ -41,6 +41,30 @@ SNAPSHOT_EVERY = 8.0
 CROP_EVERY = 1.5
 FACE_CROP = os.path.join(os.path.expanduser("~/.cache/tekdromo"), "crop.png")
 
+# The waveform panel mixes what the speaker plays with what the mic hears, and
+# the mic is far the quieter of the two: a person across the room peaks around
+# 0.1 where the sink monitor peaks near 0.5. The panel auto-scales to its own
+# recent maximum, so without a lift the mic trace is a flat line whenever
+# anything has played recently.
+SCOPE_MIC_GAIN = 4.0
+# Noise gate for the microphone feed, subtracted before the gain.
+#
+# Without it the panel is never quiet. The trace auto-scales to its own recent
+# maximum, so if the only thing arriving is room hiss, room hiss is what fills
+# the panel - a permanently jittering full-height trace, which is a worse lie
+# than the flat line it replaced. Measured on the C922 in this room: ambient
+# peaks sit at a median of 0.0029 and a 90th percentile of 0.0042, while the
+# speaker playing measures 0.1218 - twenty-nine times higher. A gate just above
+# ambient costs real sound nothing.
+#
+# It belongs here rather than in Scope: a noise floor is a property of a
+# microphone, not of a display, and Scope must keep raising the gain on genuinely
+# quiet music.
+SCOPE_MIC_FLOOR = 0.006
+# How long the answer to "which input actually works" is reused. Finding it
+# costs a short recording per candidate, and the watchdog asks every 2s.
+SCOPE_MIC_TTL = 30.0
+
 # Process start, captured at import so the startup report measures what the
 # user actually waits for - from exec to a picture - not from some later point.
 T_START = time.time()
@@ -215,35 +239,138 @@ class Display:
             "faces": 1 if present else 0,
         })
 
-    def _scope_feeder(self):
-        """Feed the scope from PulseAudio's sink monitor.
+    def _feed_reader(self, feed):
+        """Keep feed.level current from one PulseAudio source. Never returns.
 
-        @DEFAULT_MONITOR@ rather than a named device, so it follows the default
-        sink: when the Bluetooth speaker connects or drops, the trace follows
-        the audio instead of going flat against a device nobody is using.
-
-        Reconnects forever. parec exits if the sink disappears, and a scope
-        that stays dead after the speaker reconnects is worse than no scope.
+        Reconnecting is driven from OUTSIDE this loop, by _feed_watchdog, which
+        closes the source to break the read. That indirection is the whole
+        point: the obvious version checks "has the default moved?" between
+        reads, and a source that delivers nothing never gets between two reads
+        - it sits blocked in the first one forever. Which is exactly what
+        happened: at startup the default capture source is the Tegra onboard
+        input, which has nothing plugged into it, so the reader bound to a
+        device that produces no samples and could never notice that the real
+        microphone had since become the default.
         """
         from .voice import io as vio
         while self.running:
-            src = None
             try:
-                src = vio.MicSource(device="@DEFAULT_MONITOR@")
+                want = feed["resolve"]()
+                if not want:
+                    time.sleep(1.0)
+                    continue
+                src = vio.MicSource(device=want)
+                feed["src"], feed["device"] = src, want
+                feed["last_data"] = time.time()
+                print("scope: following %s" % want, flush=True)
+                gain, floor = feed.get("gain", 1.0), feed.get("floor", 0.0)
                 for frame in src:
-                    if not self.running or self.scope is None:
+                    if not self.running:
                         break
-                    self.scope.push(frame)
+                    raw = float(np.abs(frame).max()) / 32768.0
+                    feed["level"] = max(0.0, raw - floor) * gain
+                    feed["last_data"] = time.time()
             except Exception:
                 pass
             finally:
-                if src is not None:
+                feed["level"], feed["src"] = 0.0, None
+                try:
+                    src.close()
+                except Exception:
+                    pass
+            if self.running:
+                time.sleep(1.0)
+
+    def _feed_watchdog(self, feeds, check=2.0, stale=4.0):
+        """Force a feed to reconnect when it is on the wrong device or mute.
+
+        Two independent faults, because either alone leaves a flat line:
+
+        * **Wrong device.** The feeder used to open "@DEFAULT_MONITOR@".
+          PulseAudio resolves that magic name once, when the stream is created,
+          and never moves an existing stream. The display starts before
+          tek-bluetooth has connected the speaker, so the default sink at that
+          moment is the analog output - and when the speaker connected and
+          became default, every sound went somewhere the scope was not looking.
+          It showed a flat line while music played, on every boot. parec stayed
+          perfectly healthy throughout, which is why retrying on failure never
+          fired: there was no failure, just a stream aimed at the wrong place.
+
+        * **Silent device.** A source can be the right answer and still deliver
+          nothing - a dead input, or one that went away without closing the
+          stream. Waiting for a read that never comes looks identical to a
+          quiet room.
+
+        Closing the source is what breaks the reader's blocking read: parec
+        dies, the pipe closes, read() returns None and the reader rebuilds.
+        """
+        while self.running:
+            time.sleep(check)
+            now = time.time()
+            for feed in feeds:
+                src = feed.get("src")
+                if src is None:
+                    continue
+                why = None
+                try:
+                    if feed["resolve"]() != feed["device"]:
+                        why = "default moved off %s" % feed["device"]
+                except Exception:
+                    pass
+                if why is None and now - feed.get("last_data", now) > stale:
+                    why = "%s delivered nothing for %.0fs" % (feed["device"],
+                                                              stale)
+                if why:
+                    print("scope: %s - reconnecting" % why, flush=True)
+                    feed["level"] = 0.0
                     try:
                         src.close()
                     except Exception:
                         pass
-            if self.running:
-                time.sleep(3.0)
+
+    def _scope_feeder(self):
+        """Drive the waveform panel from everything audible.
+
+        Two feeds - what the speaker is playing, and what the microphone hears
+        - and ONE pusher on a steady clock taking the louder of the two. A
+        single time base matters: if each source scrolled the trace itself the
+        horizontal axis would mean different things depending on which was
+        active, and two sources at different sample rates would fight.
+
+        The microphone is included because "nothing shows when there is audio
+        out or in" is the complaint this fixes, and because with an ear on the
+        box, a panel that moves when someone talks to it is the whole point.
+        """
+        from .voice import io as vio, pcm as vpcm
+        # The monitor resolves cheaply by name. The microphone must be PROBED:
+        # the mic is built into the webcam, so a camera replug moves the
+        # PulseAudio default to the Tegra onboard input - which has nothing
+        # plugged into it - and it never moves back. Trusting the default put
+        # two recorders on a dead device while the real mic sat idle.
+        feeds = [{"resolve": vio.default_monitor, "gain": 1.0, "floor": 0.0,
+                  "level": 0.0, "src": None, "device": None, "last_data": 0.0},
+                 {"resolve": lambda: vio.working_source(ttl=SCOPE_MIC_TTL),
+                  "gain": SCOPE_MIC_GAIN, "floor": SCOPE_MIC_FLOOR,
+                  "level": 0.0, "src": None, "device": None, "last_data": 0.0}]
+        for feed in feeds:
+            t = threading.Thread(target=self._feed_reader, args=(feed,))
+            t.daemon = True
+            t.start()
+        w = threading.Thread(target=self._feed_watchdog, args=(feeds,))
+        w.daemon = True
+        w.start()
+
+        step = vpcm.FRAME_MS / 1000.0
+        nxt = time.time()
+        while self.running:
+            nxt += step
+            delay = nxt - time.time()
+            if delay > 0:
+                time.sleep(delay)
+            else:
+                nxt = time.time()             # fell behind; do not spiral
+            if self.scope is not None:
+                self.scope.push_level(max(f["level"] for f in feeds))
 
     def _event_worker(self):
         """Snapshot and send. Off the render loop entirely.

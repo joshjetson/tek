@@ -121,6 +121,9 @@ def main(argv=None):
     p.add_argument("name", nargs="?")
     p.add_argument("--samples", type=int, default=10)
 
+    p = sub.add_parser("ears", help="continuous listening: state, on, or off")
+    p.add_argument("state", nargs="?", choices=["on", "off"], default=None)
+
     p = sub.add_parser("panic",
                        help="stop the display and hand the console back")
     p.add_argument("what", nargs="?", choices=["stop", "quiet"], default="stop",
@@ -218,6 +221,30 @@ def main(argv=None):
         sys.stderr.write("failed: %s\n" % (r or {}).get("error", "no reply"))
         c.close()
         return 1
+
+    if a.cmd == "ears":
+        c = _client(a.socket, timeout=30.0)   # switching on loads Vosk
+        if c is None:
+            return 1
+        msg = {"cmd": "ears"}
+        if a.state:
+            msg["on"] = (a.state == "on")
+        r = c.request(msg) or {}
+        c.close()
+        print("  listening    %s" % r.get("listening"))
+        print("  wake words   %s" % ", ".join(r.get("wake_words") or ["?"]))
+        if "utterances" in r:
+            print("  utterances   %s heard, %s were the wake word, "
+                  "%s became commands"
+                  % (r.get("utterances"), r.get("wakes"), r.get("commands")))
+            print("  microphone   %s" % (r.get("device") or "?"))
+            print("  mic opens    %s" % r.get("opens"))
+            print("  last heard   %r" % (r.get("last_heard"),))
+            if r.get("armed"):
+                print("  ARMED - waiting for a command right now")
+        elif r.get("listening"):
+            print("  (the ear is starting up)")
+        return 0
 
     if a.cmd == "watch":
         c = _client(a.socket, timeout=15.0)

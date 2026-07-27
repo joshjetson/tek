@@ -131,3 +131,24 @@ if systemctl show tek-panic -p After --value | grep -q tek-display; then
 else
     echo "   ordering   : OK (independent of tek-display)"
 fi
+
+echo
+echo "=== 10b. PulseAudio must not exit when idle (it takes A2DP with it) ==="
+IDLE=$(pulseaudio --dump-conf 2>/dev/null | grep -oE "exit-idle-time = -?[0-9]+" | awk '{print $3}')
+echo "   exit-idle-time : ${IDLE:-unknown}"
+if [ "$IDLE" = "-1" ]; then
+    echo "   OK - the daemon never exits, so the speaker stays paired"
+else
+    echo "   *** ${IDLE}s: any moment with no client kills PulseAudio, and the"
+    echo "       Bluetooth speaker disconnects with it (96 restarts in one day) ***"
+fi
+N=$(journalctl --no-pager --since today 2>/dev/null | grep -oE "pulseaudio\[[0-9]+\]" | sort -u | wc -l)
+echo "   distinct PulseAudio processes today: $N  (want a small number)"
+
+echo
+echo "=== 11. tty1 autologin (a shell is waiting after a panic) ==="
+if systemctl show getty@tty1 -p ExecStart --value | grep -q -- "--autologin"; then
+    echo "   OK - agetty --autologin: $(systemctl show getty@tty1 -p ExecStart --value | grep -oE '\-\-autologin [a-z]+')"
+else
+    echo "   *** no autologin - a panic leaves a login prompt to type blind ***"
+fi

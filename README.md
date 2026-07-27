@@ -19,6 +19,7 @@ approach does not exist on this box.</sub>
 1. [What it is](#1-what-it-is)
 2. [Quick start](#2-quick-start)
 3. [The voice](#3-the-voice) — [all 38 Piper voices](#34-every-english-piper-voice) · [**how to speak (read this first)**](#36-speaking-from-a-shell--the-mouth-harness)
+3b. [**Listening** — the ear](#3b-listening--the-ear)
 4. [Architecture](#4-architecture)
 5. [Hardware notes and traps](#5-hardware-notes-and-traps)
 6. [Testing](#6-testing)
@@ -70,6 +71,11 @@ hundred times until they happened to land in the right fields.
 | Wifi profiles | `permissions=user:super:;` — needs a login session | system-scoped, connects at boot |
 | Wifi secret | (already `psk-flags=0`, fine) | unchanged, verified |
 | Escape hatch | none | `tek-panic.service`, ESC ×3 |
+| tty1 | login prompt, typed blind | `agetty --autologin super` |
+
+`tty1` autologin means a shell is already waiting the moment the console comes
+back, instead of a login prompt you cannot see. It is a physical-access-only
+box on a home LAN; **SSH still requires a password**.
 
 The NetworkManager change is the important half: **SSH now works before anyone
 logs in**, which is the real fix. The panic key is the fallback for when the
@@ -381,6 +387,63 @@ monotone.
 
 ---
 
+## 3b. Listening — the ear
+
+```bash
+tek ears            # state: what it is listening to, and what it has heard
+tek ears off        # stop listening (the microphone is closed, not ignored)
+```
+
+Say **"hey tek"** and then a question — in one breath, or as two. It answers out
+loud.
+
+```
+mic → Gate → VAD → wake grammar → free decode → brain → speech
+```
+
+Proven end to end through real air, nothing stubbed
+(`tools/ears_e2e.py` plays the wake word through the speaker so the mic picks it
+out of the room exactly as it would pick up a person):
+
+```
+ears: woken (1.7s) - waiting 8s for a command
+ears: heard 'what day of the week is it' (3.9s)
+event speech: saying "It's Monday."
+```
+
+Four things it must not do, each of which shaped the design:
+
+**It must not hear itself.** The mic picks the speaker up at ~11× ambient and
+Vosk transcribes Piper *perfectly* — the loopback test reads back 12 of 12
+keywords. Unchecked, it answers its own replies forever. `Gate` feeds silence to
+the segmenter while the face is speaking, plus a 1.2 s tail for A2DP latency and
+reverb. Verified by saying "Hey Tek" out loud three times: **0 wakes**.
+
+**It must not transcribe the household.** The wake grammar runs on everything,
+but it can only emit its four phrases or `[unk]` — it cannot produce a
+transcript. Full decoding happens only after the wake word matches. Local only,
+wake-word gated, nothing leaves the house.
+
+**It must not trust "the default microphone".** The mic is inside the webcam, so
+a camera replug moves the PulseAudio default to the Tegra onboard input — which
+has nothing plugged into it — and it never moves back. That was observed live:
+two recorders sitting on a dead device while the real mic was idle, with the ear
+reporting itself perfectly healthy and hearing nothing. `io.working_source()`
+probes candidates for a *varying* signal, because a dead input is not silent,
+it is constant.
+
+**It must not go quietly deaf.** Neither "wrong device" nor "no frames" ends the
+stream, so a reader just sits blocked forever. A watchdog closes the source to
+break it loose and the reader re-probes.
+
+A spoken question **skips the camera cooldown**. That cooldown exists to stop
+the camera remarking on an ordinary evening; applying it to someone who spoke
+directly to you reads as broken, not as restraint.
+
+<sub>[↑ Contents](#contents)</sub>
+
+---
+
 ## 4. Architecture
 
 ### 4.1 The DRY spine
@@ -545,6 +608,7 @@ for t in tests/*.py; do python3 "$t"; done
 | `voice_watch.py` | the camera-prompt decision gate, on a stub brain | none |
 | `hud_unit.py` | clock, scope and face panels | none |
 | `panic_unit.py` | the escape hatch, incl. a **real uinput keyboard** | root for the last part |
+| `voice_ears.py` | the self-hearing gate, wake/command logic, misheard wake words | none |
 | `voice_lipsync.py` | reads `/dev/fb0` while really speaking | display + voice |
 
 Three are disruptive and therefore live in `tools/`, not `tests/`:
@@ -554,6 +618,10 @@ Three are disruptive and therefore live in `tools/`, not `tests/`:
 | `panic_e2e.py` | the *installed service* stops the display, not just that a callback fired |
 | `panic_screen.py` | reads `/dev/fb0` before and after — the console really comes back |
 | `camera_replug.py` | deauthorizes the camera on the USB bus: a **real** unplug |
+| `mic_check.py` | the mic produces a *varying* signal, not just samples |
+| `mic_room.py` | speaks and records the room — the acoustic path, through air |
+| `ears_e2e.py` | says the wake word aloud and checks it answers |
+| `scope_check.py` | reads the waveform panel out of `/dev/fb0` while sound plays |
 
 `camera_replug.py --hold` is the important one. It holds the old `/dev/videoN`
 open across the unplug so the kernel cannot reuse that minor number, which
@@ -589,6 +657,32 @@ The display must never stop, and seven failure modes are handled explicitly —
 startup gap, per-frame exceptions, systemd's start limit, the console blanker, a
 wedged model, blanking on exit, and a camera that has not enumerated yet. See
 `TEKDROMO.md` §5.
+
+### The speaker disconnecting is usually PulseAudio, not Bluetooth
+
+If the speaker drops and has to be woken by hand, check this before touching
+anything in BlueZ:
+
+```bash
+pulseaudio --dump-conf | grep exit-idle
+journalctl --since today | grep -oE 'pulseaudio\[[0-9]+\]' | sort -u | wc -l
+```
+
+PulseAudio's default `exit-idle-time` is **20 seconds**: with no client
+connected it shuts down, and the next client autospawns a fresh daemon. Every
+one of those restarts tears down the A2DP link. **96 distinct PulseAudio
+processes were logged in a single day** while this was tracked down.
+
+It had run an entire night without a single drop, which is what made it look
+like a regression in something else. The reason is that the display holds one
+permanent recorder on the sink monitor, so the daemon was never idle — a
+fragile thing to rest a speaker connection on. Anything that briefly closes
+every stream (restarting a service, probing a device) opens a 20-second window
+in which the whole audio stack quietly dies.
+
+`exit-idle-time = -1` in `/etc/pulse/daemon.conf` (backup kept alongside it).
+Verified: the full test suite now runs start to finish without the daemon's PID
+changing. `tools/check_boot.sh` check 10b guards it.
 
 ### Keeping the Bluetooth speaker awake
 

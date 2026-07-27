@@ -395,7 +395,16 @@ class Scope(object):
         s = np.asarray(samples, dtype=np.float32) / 32768.0
         if not len(s):
             return
-        lvl = float(np.abs(s).max())
+        self.push_level(float(np.abs(s).max()))
+
+    def push_level(self, lvl):
+        """Advance one column with an already-measured level.
+
+        Separate from push() so that several audio sources - what the speaker
+        is playing AND what the microphone hears - can share one time base.
+        Letting each source scroll the trace itself would make the horizontal
+        axis mean different things depending on which one was active.
+        """
         self.levels[:-1] = self.levels[1:]      # scroll left
         self.levels[-1] = lvl
         self.peak = max(lvl, self.peak * 0.995)
