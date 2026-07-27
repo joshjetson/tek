@@ -179,20 +179,27 @@ check("an exact wake word is stripped",
 check("a misheard wake word is stripped too",
       stt.strip_wake("hate tech what's up") == "what's up",
       stt.strip_wake("hate tech what's up"))
-check("a swallowed greeting is stripped",
-      stt.strip_wake("tech turn the lights off") == "turn the lights off",
-      stt.strip_wake("tech turn the lights off"))
+check("a badly misheard wake word is stripped ('we tank' for 'hey tek')",
+      stt.strip_wake("we tank is the microphone working")
+      == "is the microphone working",
+      stt.strip_wake("we tank is the microphone working"))
 check("punctuation around the wake word does not defeat it",
       stt.strip_wake("Hey, tek, what time is it") == "what time is it",
       stt.strip_wake("Hey, tek, what time is it"))
 # And it must not eat real words. "hey there" has no tek-like second token;
 # "take the bins out" starts with a tek-like token but nothing preceded it, so
 # only the leading-token rule could fire - it must not.
-check("an ordinary two words are left alone",
+check("an ordinary command is left alone",
       stt.strip_wake("what time is it") == "what time is it")
-check("a sentence that merely starts with 'hey' is untouched",
-      stt.strip_wake("hey there how are you") == "hey there how are you",
-      stt.strip_wake("hey there how are you"))
+# Openings that must survive. These are the ones measured closest to the
+# threshold, so if it is ever loosened this is what breaks first.
+for phrase in ("what time is it", "is the door locked", "how are you doing",
+               "turn the lights off", "we should go outside",
+               "tell me a joke", "play some music", "what day is it"):
+    check("survives an ordinary opening: %r" % phrase[:22],
+          stt.strip_wake(phrase) == phrase, stt.strip_wake(phrase))
+check("a short phrase is never stripped to nothing",
+      stt.strip_wake("hey tak") == "hey tak", stt.strip_wake("hey tak"))
 
 # -- constants -------------------------------------------------------------
 check("the speak tail covers A2DP latency and some reverb",

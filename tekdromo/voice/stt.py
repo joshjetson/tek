@@ -140,13 +140,27 @@ def heard_wake(text):
     return any(w in t for w in WAKE_WORDS)
 
 
-# What the FREE decoder tends to produce where the wake word was. It has 200k
-# words to choose from, so it mishears far more often than the grammar - which
-# can only pick between four phrases and therefore matched perfectly. Observed
-# in the room: "hey tech" came back as "hate tech", and the whole thing was
-# then handed on as the command.
-_WAKE_TAIL = ("tek", "tech", "tec", "tekk", "take", "tach")
-_WAKE_HEAD = ("hey", "hi", "hay", "hate", "eight", "ok", "okay", "a")
+# How close the first two words must look to a wake phrase to be treated as a
+# mangled one. The free decoder has 200k words to choose from, so it mishears
+# far more often than the grammar, which can only pick between four phrases and
+# therefore matched perfectly. Observed in this room: "hey tech" came back as
+# "hate tech", and "hey tek" as "we tank" - both were then handed on as part of
+# the command.
+#
+# A list of known variants was the first attempt and it does not converge; each
+# new mishearing needs a new entry. Measured similarity separates the two cases
+# on its own:
+#
+#   mishearings   hey tec 0.93  hey tak 0.86  okay tek 0.86  hate tech 0.82
+#                 hi tech 0.80  a tech 0.77   we tank 0.57
+#   real openings what time 0.50  is the 0.50  how are 0.46  turn the 0.43
+#                 play some 0.38  we should 0.35  tell me 0.31  what day 0.27
+#
+# 0.55 splits them. The margin at the bottom is thin (0.57 against 0.50), and
+# both ways of being wrong are mild: a bad strip drops two words the brain can
+# usually infer, a missed strip leaves noise it is already told to read
+# through.
+_WAKE_FUZZ = 0.55
 
 
 def strip_wake(text):
@@ -168,14 +182,14 @@ def strip_wake(text):
         if low.startswith(w):
             return t[len(w):].strip(" ,.")
 
+    import difflib
     words = t.split()
-    def bare(i):
-        return words[i].lower().strip(",.!?") if i < len(words) else ""
-
-    # "<something> tek ..." - the give-away is the second token.
-    if len(words) >= 2 and bare(1) in _WAKE_TAIL and bare(0) in _WAKE_HEAD:
+    if len(words) < 3:
+        # Two words or fewer that did not match exactly: there is no command
+        # in there to rescue, and stripping would leave nothing.
+        return t
+    head = " ".join(w.lower().strip(",.!?") for w in words[:2])
+    if max(difflib.SequenceMatcher(None, head, w).ratio()
+           for w in WAKE_WORDS) >= _WAKE_FUZZ:
         return " ".join(words[2:]).strip(" ,.")
-    # "tek ..." - the greeting itself was swallowed.
-    if words and bare(0) in _WAKE_TAIL:
-        return " ".join(words[1:]).strip(" ,.")
     return t
