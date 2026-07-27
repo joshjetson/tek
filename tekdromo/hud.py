@@ -173,13 +173,24 @@ class Clock(object):
     never be given avoidable work.
     """
 
-    def __init__(self, w, h, margin=26, digit=(26, 44), small=(15, 24)):
+    # Unlit segments, drawn faintly. This is the detail that makes a
+    # seven-segment display read as hardware rather than as drawn text - and it
+    # only works with a real dim layer. Rendered at full brightness the stubs
+    # merge with the lit segments and "8:47" reads as "8:40".
+    GHOST_LEVEL = 0.18
+
+    def __init__(self, w, h, margin=26, digit=(26, 44), small=(15, 24),
+                 ghosts=True, seconds=True, weekday=True):
         self.w, self.h = w, h
         self.margin = margin
         self.dw, self.dh = digit
         self.sw, self.sh = small
+        self.ghosts = ghosts
+        self.show_seconds = seconds
+        self.show_weekday = weekday
         self._key = None
         self._pts = np.zeros((0, 2, 2), np.int32)
+        self._dim = np.zeros((0, 2, 2), np.int32)
 
     def strings(self, when=None):
         """(time, meridiem, date). Local time - the machine is on
@@ -192,50 +203,86 @@ class Clock(object):
         # the hour, because the box is sized from its contents.
         return ("%s%d:%02d" % ("_" if hour12 < 10 else "", hour12, lt.tm_min),
                 "PM" if lt.tm_hour >= 12 else "AM",
-                time.strftime("%m/%d/%Y", lt))
+                time.strftime("%m/%d/%Y", lt),
+                "%02d" % lt.tm_sec,
+                time.strftime("%a", lt).upper())
+
+    def _ghost_segments(self, ch, x, y, w, h):
+        """The segments this digit does NOT light."""
+        lit = set(_DIGITS.get(ch, ""))
+        if ch == "1":
+            return []           # drawn as a centred bar, not as b+c
+        if ch not in _DIGITS:
+            return []
+        out = []
+        for name, (a, b) in _SEG.items():
+            if name in lit:
+                continue
+            out.append(((x + a[0] * w, y + a[1] * h),
+                        (x + b[0] * w, y + b[1] * h)))
+        return out
 
     def build(self, when=None):
-        hhmm, mer, date = self.strings(when)
+        hhmm, mer, date, secs, dow = self.strings(when)
         blink = int(when if when is not None else time.time()) % 2 == 0
         shown = hhmm if blink else hhmm.replace(":", " ")
 
-        segs = []
-        # Lay the contents out first, then size the box to fit them, so
-        # changing the digit size does not require re-tuning the frame.
+        lit, dim = [], []
         tsegs, tw = text(shown, 0, 0, self.dw, self.dh)
-        msegs, mw = text(mer, tw + self.dw * 0.95, self.dh * 0.44,
+        lit.extend(tsegs)
+        if self.ghosts:
+            cx = 0.0
+            for ch in shown:
+                cell = self.dw * 0.45 if ch in ":./ " else self.dw
+                dim.extend(self._ghost_segments(ch, cx, 0, cell, self.dh))
+                cx += cell + self.dw * 0.28
+        cur = tw
+        if self.show_seconds:
+            ssegs, sw = text(":" + secs, cur + self.dw * 0.30,
+                             self.dh * 0.44, self.sw, self.sh)
+            lit.extend(ssegs)
+            cur += self.dw * 0.30 + sw
+        msegs, mw = text(mer, cur + self.dw * 0.45, self.dh * 0.44,
                          self.sw, self.sh)
-        dsegs, dw = text(date, 0, self.dh + 20, self.sw, self.sh)
+        lit.extend(msegs)
+        inner_w = cur + self.dw * 0.45 + mw
 
-        inner_w = max(tw + self.dw * 0.95 + mw, dw)
+        # Weekday abbreviations are always three characters and seconds always
+        # two, so neither changes the panel's width.
+        bottom = (dow + "  " if self.show_weekday else "") + date
+        dsegs, dw2 = text(bottom, 0, self.dh + 20, self.sw, self.sh)
+        lit.extend(dsegs)
+        inner_w = max(inner_w, dw2)
+
         pad_x, pad_y = 18, 14
         bw = inner_w + pad_x * 2
         bh = self.dh + 20 + self.sh + pad_y * 2
-        # Upper right, as seen by someone looking at the screen.
         bx = self.w - self.margin - bw
         by = self.margin
 
-        segs.extend(box(bx, by, bw, bh, notch=7))
-        # A rule between clock and date; makes it read as one instrument
-        # instead of two numbers sharing a border.
+        frame = box(bx, by, bw, bh, notch=7)
         ry = by + pad_y + self.dh + 9
-        segs.append(((bx + pad_x, ry), (bx + bw - pad_x, ry)))
+        frame.append(((bx + pad_x, ry), (bx + bw - pad_x, ry)))
 
         ox, oy = bx + pad_x, by + pad_y
-        for group in (tsegs, msegs, dsegs):
-            segs.extend((((ax + ox, ay + oy), (bx2 + ox, by2 + oy)))
-                        for (ax, ay), (bx2, by2) in group)
-        return to_pts(segs), (bx, by, bw, bh)
+        shift = lambda L: [((a[0] + ox, a[1] + oy), (b[0] + ox, b[1] + oy))
+                           for a, b in L]
+        return (to_pts(frame + shift(lit)), to_pts(shift(dim)),
+                (bx, by, bw, bh))
 
     def points(self, when=None):
         """Cached per displayed second."""
         now = when if when is not None else time.time()
-        hhmm, mer, date = self.strings(now)
-        key = (hhmm, mer, date, int(now) % 2)
+        key = self.strings(now) + (int(now) % 2,)
         if key != self._key:
             self._key = key
-            self._pts, self.rect = self.build(now)
+            self._pts, self._dim, self.rect = self.build(now)
         return self._pts
+
+    def dim_points(self, when=None):
+        """The unlit segments, for the renderer's dim layer."""
+        self.points(when)
+        return self._dim
 
 
 class Scope(object):

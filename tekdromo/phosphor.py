@@ -62,7 +62,7 @@ def build_statics(w, h):
     lut = make_lut(PHOSPHOR_BGR)
     return vig, grain, lut, vig_u8, grain_u8
 
-def render_bgra(pts, w, h, statics, intensity=1.0):
+def render_bgra(pts, w, h, statics, intensity=1.0, dim=None, dim_level=0.30):
     """Vectors -> a BGRA frame ready to memcpy into the panel.
 
     Runs entirely in uint8. The pipeline is memory-bandwidth bound, not compute
@@ -82,6 +82,14 @@ def render_bgra(pts, w, h, statics, intensity=1.0):
     # Beam at 127 = intensity 1.0, so bloom can add another 128 before the LUT
     # clips - that headroom is what produces the white saturated core.
     beam = np.zeros((h, w), dtype=np.uint8)
+    # A second, dimmer set of strokes drawn into the SAME beam buffer. One
+    # extra polylines call, no extra full-frame pass - which is what makes it
+    # affordable. It exists for the unlit segments of the clock: a real LED
+    # display shows them faintly, and at a single intensity they read as noise
+    # corrupting the digits rather than as hardware.
+    if dim is not None and len(dim):
+        cv2.polylines(beam, dim, False, int(127 * intensity * dim_level), 1,
+                      cv2.LINE_AA)
     if len(pts):
         cv2.polylines(beam, pts, False, int(127 * intensity), 1, cv2.LINE_AA)
 

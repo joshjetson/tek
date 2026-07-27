@@ -43,7 +43,7 @@ def shown(s):
     return s.replace("_", "").strip()
 
 
-t, mer, date = c.strings()
+t, mer, date, secs, dow = c.strings()
 check("time agrees with the system clock",
       "%s %s" % (shown(t), mer) == time.strftime("%-I:%M %p"),
       "%s %s vs %s" % (shown(t), mer, time.strftime("%-I:%M %p")))
@@ -95,6 +95,31 @@ for mo, d, y in ((11, 28, 2026), (1, 1, 2027), (12, 30, 2025)):
     cc.points(at(y, mo, d, 10, 8))
     rects.add(tuple(int(v) for v in cc.rect))
 check("nor does a different date", len(rects) == 1, sorted(rects))
+# Seconds and the weekday must not resize it either: seconds are always two
+# digits and weekday abbreviations always three characters, but that has to be
+# true in practice, not just in principle.
+for ss in (0, 7, 59):
+    for day in range(1, 8):
+        cc = hud.Clock(W, H)
+        cc.points(at(2026, 7, 20 + day, 10, 8, ss))
+        rects.add(tuple(int(v) for v in cc.rect))
+check("seconds and weekday do not resize the panel", len(rects) == 1,
+      sorted(rects))
+check("the clock shows seconds", c.strings(at(2026, 7, 26, 10, 8, 42))[3] == "42")
+check("the clock shows the weekday",
+      c.strings(at(2026, 7, 26, 10, 8))[4] in
+      ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"))
+# Unlit segments go to the DIM layer. At full brightness they merge with the
+# lit ones and "8:47" reads as "8:40".
+cg = hud.Clock(W, H)
+cg.points(at(2026, 7, 26, 10, 8, 42))
+check("unlit segments are emitted separately for the dim layer",
+      len(cg.dim_points()) > 0, len(cg.dim_points()))
+check("the dim layer is a different set from the bright one",
+      len(cg.dim_points()) < len(cg.points()))
+cn = hud.Clock(W, H, ghosts=False)
+cn.points(at(2026, 7, 26, 10, 8, 42))
+check("ghosts can be turned off", len(cn.dim_points()) == 0)
 
 x, y, bw, bh = list(rects)[0]
 

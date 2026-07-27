@@ -402,9 +402,12 @@ class Display:
                 # they are simply concatenated and go through ONE render pass.
                 # Drawing them separately would mean a second bloom and a
                 # second LUT, and two looks that drift apart.
-                panels = []
+                panels, faint = [], []
                 if self.clock is not None:
                     panels.append(self.clock.points())
+                    # Unlit seven-segment strokes go to the renderer's dim
+                    # layer, not the bright one.
+                    faint.append(self.clock.dim_points())
                 if self.scope is not None:
                     panels.append(self.scope.points())
                 if self.face_panel is not None:
@@ -417,7 +420,14 @@ class Display:
                 if panels:
                     pts = np.concatenate([pts] + panels) if len(pts) \
                         else np.concatenate(panels)
-                frame = phosphor.render_bgra(pts, self.w, self.h, self.statics)
+                dim = None
+                if faint:
+                    dim = np.concatenate(faint)
+                    if not len(dim):
+                        dim = None
+                frame = phosphor.render_bgra(pts, self.w, self.h, self.statics,
+                                             dim=dim,
+                                             dim_level=hud.Clock.GHOST_LEVEL)
                 if self.stars is not None:
                     frame = self.stars.under(frame, t)
                 self.screen[:] = frame
