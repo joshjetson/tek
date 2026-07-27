@@ -1,0 +1,22 @@
+[Unit]
+Description=TEKDROMO panic key (ESC x3 returns the console, ESC x5 also silences)
+# Deliberately NOT After=tek-display: the escape hatch must come up before, and
+# stay up independently of, the thing it exists to escape from.
+DefaultDependencies=no
+After=local-fs.target
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=simple
+# Runs as root: reading /dev/input and calling systemctl both require it.
+# Invoked by absolute path, with no PYTHONPATH and no project imports, so a
+# broken tekdromo package cannot take the recovery mechanism down with it.
+ExecStart=/usr/bin/python3 /home/super/tekdromo/tekdromo/panic.py
+Restart=always
+RestartSec=1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -121,12 +121,30 @@ def main(argv=None):
     p.add_argument("name", nargs="?")
     p.add_argument("--samples", type=int, default=10)
 
+    p = sub.add_parser("panic",
+                       help="stop the display and hand the console back")
+    p.add_argument("what", nargs="?", choices=["stop", "quiet"], default="stop",
+                   help="stop: just the display. quiet: the voice as well.")
+
     sub.add_parser("status", help="service state")
     sub.add_parser("voices", help="which voices work here")
     p = sub.add_parser("listen", help="print mouth frames as they are published")
     p.add_argument("--seconds", type=float, default=0)
 
     a = ap.parse_args(argv)
+
+    if a.cmd == "panic":
+        # The same action the ESC chord performs, for when you still have a
+        # shell. Deliberately routed through tekdromo.panic rather than calling
+        # systemctl here: stopping the display is only half of it - the panel
+        # keeps the last frame, so the console has to be forced to repaint.
+        import subprocess
+        from .. import panic as _panic
+        if os.geteuid() != 0:
+            return subprocess.call(["sudo", sys.executable, _panic.__file__,
+                                    "--now", a.what])
+        print("stopped %s" % ", ".join(_panic.panic(a.what)))
+        return 0
 
     if a.cmd == "voices":
         from . import tts

@@ -77,3 +77,57 @@ echo "=== 8. WARM start (caches present, as on every boot after the first) ==="
 OLDPID=$(systemctl show tek-display -p MainPID --value)
 eval "$SUDO systemctl restart tek-display" 2>/dev/null
 report "$OLDPID"
+
+# --------------------------------------------------------------------------
+# 9 and 10 exist because of a real lockout: the box rebooted, the display
+# covered the console, and the network did not come up because the wifi
+# profile was user-scoped and nobody had logged in. Both are boot-only
+# failures - everything looks perfect from an established session, which is
+# exactly why they need checking from here rather than by eye.
+# --------------------------------------------------------------------------
+echo
+echo "=== 9. network comes up WITHOUT a login session ==="
+BAD=0
+for f in /etc/NetworkManager/system-connections/*; do
+    [ -e "$f" ] || continue
+    NAME=$(basename "$f")
+    PERM=$(eval "$SUDO grep -h '^permissions=' \"$f\"" 2>/dev/null | cut -d= -f2-)
+    AUTO=$(nmcli -g connection.autoconnect con show "$NAME" 2>/dev/null)
+    # psk-flags absent or 0 means NetworkManager holds the secret itself. Any
+    # other value means it asks a secret agent, and there is no agent until
+    # somebody logs in.
+    FLAGS=$(eval "$SUDO grep -h '^psk-flags=' \"$f\"" 2>/dev/null | cut -d= -f2-)
+    FLAGS=${FLAGS:-0}
+    if [ -n "$PERM" ]; then
+        echo "   *** $NAME: permissions=$PERM - will NOT connect before login ***"
+        BAD=1
+    elif [ "$FLAGS" != "0" ]; then
+        echo "   *** $NAME: psk-flags=$FLAGS - needs a logged-in secret agent ***"
+        BAD=1
+    else
+        echo "   OK      $NAME (system-scoped, secret stored, autoconnect=$AUTO)"
+    fi
+done
+[ "$BAD" = 0 ] && echo "   -> SSH will be reachable before anyone logs in"
+
+echo
+echo "=== 10. the panic key (ESC x3) will be running ==="
+echo "   is-enabled : $(systemctl is-enabled tek-panic 2>&1)"
+echo "   is-active  : $(systemctl is-active tek-panic 2>&1)"
+LINK=/etc/systemd/system/multi-user.target.wants/tek-panic.service
+[ -L "$LINK" ] && echo "   wants-link : OK" \
+               || echo "   wants-link : *** MISSING - no escape hatch at boot ***"
+# An empty User= means root, which is what this unit needs: reading
+# /dev/input and calling systemctl both require it.
+PU=$(systemctl show tek-panic -p User --value)
+echo "   User       : ${PU:-root} $([ -z "$PU" ] && echo '(needed for /dev/input + systemctl)' || echo '*** must be root ***')"
+PPID_=$(systemctl show tek-panic -p MainPID --value)
+NDEV=$(eval "$SUDO ls -l /proc/$PPID_/fd" 2>/dev/null | grep -c 'input/event')
+echo "   watching   : $NDEV input device(s)"
+[ "${NDEV:-0}" -gt 0 ] || echo "   *** watching nothing - the chord cannot fire ***"
+# It must not depend on the thing it exists to escape from.
+if systemctl show tek-panic -p After --value | grep -q tek-display; then
+    echo "   *** ordered After=tek-display - it must NOT be ***"
+else
+    echo "   ordering   : OK (independent of tek-display)"
+fi

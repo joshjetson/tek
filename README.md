@@ -15,6 +15,7 @@ approach does not exist on this box.</sub>
 
 ## Contents
 
+0. [**Getting out — the panic key**](#0-getting-out--the-panic-key) ← if you are staring at a face you cannot dismiss
 1. [What it is](#1-what-it-is)
 2. [Quick start](#2-quick-start)
 3. [The voice](#3-the-voice) — [all 38 Piper voices](#34-every-english-piper-voice) · [**how to speak (read this first)**](#36-speaking-from-a-shell--the-mouth-harness)
@@ -25,6 +26,89 @@ approach does not exist on this box.</sub>
 8. [Measured results](#8-measured-results)
 9. [The camera can prompt me](#9-the-camera-can-prompt-me)
 10. [What is next](#10-what-is-next)
+
+---
+
+## 0. Getting out — the panic key
+
+### Press ESC three times.
+
+The display stops and the text console comes back, in about **0.7 s**. Five
+presses instead of three stops the voice as well.
+
+```
+ESC ESC ESC        console back
+ESC ESC ESC ESC ESC   console back, and silence
+
+sudo systemctl start tek-display     # bring the face back
+```
+
+From a shell — local or over SSH — the same thing is `tek panic`
+(or `tek panic quiet`).
+
+### Why this needs to exist
+
+This was found the hard way. The machine rebooted and became genuinely
+unusable:
+
+* The display writes straight to `/dev/fb0`, over the top of the text console.
+  It does not own a VT, so **`Ctrl+Alt+F2` does not help** — switching consoles
+  repaints the screen and the display simply paints over it again 33 ms later.
+* `Display.close` deliberately leaves the last frame on the panel, because it
+  makes service restarts invisible ([§8](#8-measured-results)). So even
+  stopping the display leaves the face sitting there.
+* The wifi was configured as a **user** connection, so it did not come up until
+  somebody logged in — and nobody could see the login prompt to log in.
+
+The only way back in was to blind-type a username and password roughly a
+hundred times until they happened to land in the right fields.
+
+### What was changed
+
+| | Before | After |
+|---|---|---|
+| Wifi profiles | `permissions=user:super:;` — needs a login session | system-scoped, connects at boot |
+| Wifi secret | (already `psk-flags=0`, fine) | unchanged, verified |
+| Escape hatch | none | `tek-panic.service`, ESC ×3 |
+
+The NetworkManager change is the important half: **SSH now works before anyone
+logs in**, which is the real fix. The panic key is the fallback for when the
+network is also gone.
+
+### How the panic key is built
+
+`tekdromo/panic.py`, run as root by `tek-panic.service`. Every choice in it is
+about the failure case rather than the happy path:
+
+* **It is a separate process.** A panic key inside the thing you are escaping
+  from is not a panic key — the case you need it for is the one where that
+  process is wedged.
+* **It imports nothing from this project, not even numpy.** The escape hatch
+  must not be able to fail for the same reason the thing it rescues failed.
+* **It rescans `/dev/input` every 2 s.** The keyboard gets plugged in *after*
+  things go wrong, so enumerating once at startup would miss the only keyboard
+  that ever matters. It watches every device rather than guessing which are
+  keyboards — nothing but a keyboard sends `KEY_ESC`, and this box already has
+  a webcam that registers as one.
+* **Autorepeat does not count** (`value == 2`), so leaning on the key does
+  nothing.
+* **The window is measured on the monotonic clock**, because this box sets its
+  clock from the network a minute into boot and a wall-clock jump mid-chord
+  would otherwise fire it by itself.
+* **It forces the console to repaint** by switching VT away and back. Stopping
+  the display is only half the job.
+
+Measured on the live system: stop 0.22 s, repaint 0.44 s, and the panel goes
+from 127,576 lit pixels to 25,267 — the face gone, a console in its place.
+`tests/panic_unit.py` proves the chord logic and drives a **real virtual
+keyboard through the kernel input stack**, created *after* the watcher starts,
+because that ordering is the entire point. `tools/panic_e2e.py` fires it at the
+live service.
+
+### Still stuck?
+
+`Alt+SysRq` is fully enabled (`kernel.sysrq = 1`). `Alt+SysRq+R E I S U B` is
+the last resort — it will reboot the box without corrupting the filesystem.
 
 ---
 
@@ -458,7 +542,16 @@ for t in tests/*.py; do python3 "$t"; done
 | `voice_loopback.py` | the whole Source/Sink pipeline on stubs | none |
 | `voice_bus.py` | protocol framing, dead subscribers, slow clients | none |
 | `voice_stt.py` | recognition + VAD, using **Piper as the test signal** | none |
+| `voice_watch.py` | the camera-prompt decision gate, on a stub brain | none |
+| `hud_unit.py` | clock, scope and face panels | none |
+| `panic_unit.py` | the escape hatch, incl. a **real uinput keyboard** | root for the last part |
 | `voice_lipsync.py` | reads `/dev/fb0` while really speaking | display + voice |
+
+Two are disruptive and therefore live in `tools/`, not `tests/`:
+`tools/panic_e2e.py` fires the panic chord at the running service, and
+`tools/panic_screen.py` reads `/dev/fb0` before and after to prove the console
+really comes back rather than merely that a unit stopped. Both restart the
+display afterwards.
 
 `voice_stt.py` is the one worth noting: with no microphone available, **Piper
 speaks the test sentences and Vosk reads them back**. The loop closes on-box.
@@ -473,9 +566,14 @@ or distance.
 ## 7. Services
 
 ```bash
-systemctl status tek-display tek-voice tek-bluetooth
+systemctl status tek-display tek-voice tek-bluetooth tek-panic
 tools/check_boot.sh          # verify boot survival WITHOUT rebooting
 ```
+
+`tek-panic` is the odd one out: it runs as **root**, has
+`DefaultDependencies=no`, and is deliberately *not* ordered after
+`tek-display`. It exists to escape the display, so it must come up before it
+and survive independently of it — see [§0](#0-getting-out--the-panic-key).
 
 `tek-display` and `tek-voice` **must agree on `XDG_RUNTIME_DIR`** or each looks
 for the socket in a different place and they silently never connect.

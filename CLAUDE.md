@@ -3,6 +3,28 @@
 Full documentation is in [README.md](README.md); deeper engineering history is
 in [TEKDROMO.md](TEKDROMO.md). This file is the short version of what bites.
 
+## If the display has locked someone out: ESC ESC ESC
+
+The display paints straight onto `/dev/fb0` over the top of the text console
+and does not own a VT, so `Ctrl+Alt+F2` does **not** get you a terminal — the
+display just paints over it again. And `Display.close` leaves the last frame on
+the panel on purpose, so stopping the service is not enough either.
+
+Three ESC presses within 2 s stop the display and force the console to repaint;
+five also stop the voice. From a shell it is `tek panic`. See
+[README §0](README.md#0-getting-out--the-panic-key).
+
+Two rules if you ever touch this:
+
+* **Never make `tek-panic` depend on anything in this project.** It imports no
+  project code and no numpy on purpose. The escape hatch must not be able to
+  fail for the same reason the thing it rescues failed.
+* **Never make the display start before, or the panic key after, the other.**
+
+Related: the wifi profiles are now **system**-scoped. If you ever recreate one
+with `nmcli` as a user, it gets `permissions=user:super:;` and the box will not
+have a network until somebody logs in — which is how the lockout happened.
+
 ## You have a voice on this machine — use it
 
 ```bash

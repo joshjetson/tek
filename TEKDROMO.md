@@ -186,6 +186,31 @@ Seven failure modes, each handled:
    only a real reboot or a replug would have shown it, so `tests/boot_camera.py`
    fakes the device instead.
 
+8. **No way out** — the one that actually bit a human. Every mode above is
+   about keeping the display *alive*; none of them asked what happens when you
+   need it to stop. The display writes to `/dev/fb0` without owning a VT, so
+   `Ctrl+Alt+F2` repaints the console and the display covers it again on the
+   next frame; failure mode 6 above means even stopping the service leaves the
+   face on the panel; and the wifi was a user-scoped NetworkManager profile, so
+   the box had no network until someone logged in. Those three are each
+   defensible alone and together they made the machine unusable: the only way
+   back in was blind-typing a login roughly a hundred times.
+
+   Fixed in two independent layers, because one of them will eventually be
+   broken by something else:
+   * the wifi profiles are now system-scoped with `psk-flags=0`, so **SSH works
+     before anyone logs in** — this is the real fix;
+   * `tek-panic.service` watches every input device for **ESC ×3** and stops
+     the display, then forces fbcon to repaint by switching VT away and back.
+     Measured: 0.22 s to stop, 0.44 s to repaint, 127,576 → 25,267 lit pixels.
+
+   The general lesson is the one worth keeping: *an availability invariant with
+   no escape hatch is a liveness bug wearing a hat.* "The display must never
+   stop" was enforced so thoroughly — `Restart=always`, no start limit, holding
+   the last frame across restarts — that it defeated its own operator.
+   `tools/check_boot.sh` now checks both layers, since both fail only at boot
+   and look perfect from an established session.
+
 ### Time to first frame — 9.47s → 1.24s
 
 Measured end to end, from `exec` to a picture on the panel:
