@@ -430,3 +430,13 @@ FDL contours are organic where the reference is crisp quad topology.
 **Deliberately not done:** local LLMs (sm_53 + CUDA 10.2 cannot build modern
 llama.cpp kernels; it would fall back to 4 weak cores). The intended split is
 **the Nano is the senses and the always-on body; the brain is an API call.**
+
+---
+
+## Licence
+
+[Apache License 2.0](LICENSE) — see the
+[README](README.md#licence) for why that one, and
+[README §11](README.md#11-privacy-consent-and-what-this-is-not) for the
+deployment responsibilities that come with pointing a camera and a microphone
+at people.
