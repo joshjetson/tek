@@ -1,0 +1,28 @@
+[Unit]
+Description=Tektronix 4014 vector display (framebuffer, no X)
+After=multi-user.target
+# NO start limit. The default (give up permanently after N failures) is exactly
+# what we must not have - the display has to come back no matter what. On
+# systemd 237 these belong in [Unit]; putting them in [Service] is silently
+# ignored, which is how the limit was still 10s after the first attempt.
+StartLimitIntervalSec=0
+StartLimitBurst=0
+
+[Service]
+Type=simple
+User=super
+# numpy 1.19.5 SIGILLs on Cortex-A57 without this; /etc/environment is only
+# read at login, so systemd services need it stated explicitly.
+Environment=OPENBLAS_CORETYPE=ARMV8
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+WorkingDirectory=/home/super/tekdromo
+ExecStart=/usr/bin/python3 /home/super/tekdromo/run.py
+
+StandardOutput=journal
+StandardError=journal
+
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

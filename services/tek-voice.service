@@ -1,0 +1,34 @@
+[Unit]
+Description=TEKDROMO voice service (TTS, speaker, mouth stream)
+After=sound.target tek-bluetooth.service
+Wants=tek-bluetooth.service
+# Same reasoning as tek-display: must keep retrying forever. On systemd 237
+# these belong in [Unit], not [Service], where they are silently ignored.
+StartLimitIntervalSec=0
+StartLimitBurst=0
+
+[Service]
+Type=simple
+User=super
+Environment=OPENBLAS_CORETYPE=ARMV8
+# The socket lives under XDG_RUNTIME_DIR. This and tek-display MUST agree on
+# it, or each looks for the socket in a different place and they silently
+# never connect. pacat also needs it to reach the user's PulseAudio.
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+# vosk's libvosk.so is built against GCC 11+ libstdc++ and will not load
+# against Ubuntu 18.04's GCC 7.5 runtime. A newer one is kept in tekdromo/lib
+# and used HERE ONLY - the system runtime is deliberately untouched, because
+# replacing it system-wide on a JetPack box risks the CUDA/OpenCV stack.
+Environment=LD_LIBRARY_PATH=/home/super/tekdromo/lib
+# claude lives in ~/.local/bin, which is NOT in systemd's default PATH.
+Environment=PATH=/home/super/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+WorkingDirectory=/home/super/tekdromo
+ExecStart=/usr/bin/python3 -m tekdromo.voice.service --cooldown 180
+Restart=always
+RestartSec=2
+# The display gets priority: rendering is continuous, speech is bursty.
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

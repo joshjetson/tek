@@ -1,0 +1,23 @@
+[Unit]
+Description=Keep the Bluetooth speaker connected and audio routed to it
+After=bluetooth.service sound.target
+Wants=bluetooth.service
+# No start limit, same reasoning as tek-display: this must keep retrying
+# forever. On systemd 237 these belong in [Unit].
+StartLimitIntervalSec=0
+StartLimitBurst=0
+
+[Service]
+Type=simple
+User=super
+# pactl needs the user's PulseAudio; bluetoothd needs the system bus. Both are
+# reached through these two, and neither is set for a non-login service.
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+ExecStart=/home/super/tekdromo/tools/bt_keepalive.sh
+Restart=always
+RestartSec=5
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
