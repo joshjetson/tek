@@ -144,6 +144,11 @@ def main(argv=None):
     p.add_argument("what", nargs="?", choices=["stop", "quiet"], default="stop",
                    help="stop: just the display. quiet: the voice as well.")
 
+    sub.add_parser("interrupt", help="stop the current reply now")
+    p = sub.add_parser("barge",
+                       help="barge-in: talk over a reply to stop it")
+    p.add_argument("state", nargs="?", choices=["on", "off"], default=None)
+
     sub.add_parser("status", help="service state")
     sub.add_parser("voices", help="which voices work here")
     p = sub.add_parser("listen", help="print mouth frames as they are published")
@@ -381,6 +386,32 @@ def main(argv=None):
         recog.note_enrolled(name, len(recog.samples(name)))
         print("  enrolled %s with %d samples; the display picks it up within "
               "a few seconds" % (name, got))
+        return 0
+
+    if a.cmd == "interrupt":
+        c = _client(a.socket, timeout=10.0)
+        if c is None:
+            return 1
+        r = c.request({"cmd": "interrupt", "why": "asked"}) or {}
+        c.close()
+        print("  stopped" if r.get("stopped") else "  nothing was being said")
+        return 0
+
+    if a.cmd == "barge":
+        c = _client(a.socket, timeout=10.0)
+        if c is None:
+            return 1
+        msg = {"cmd": "barge"}
+        if a.state:
+            msg["on"] = (a.state == "on")
+        r = c.request(msg) or {}
+        c.close()
+        print("  barge-in   %s" % ("on" if r.get("enabled") else "off"))
+        print("  stopped    %s time(s) this session" % r.get("barges"))
+        if r.get("live"):
+            print("  right now  %s" % r["live"])
+        if r.get("last"):
+            print("  last       %s" % r["last"])
         return 0
 
     if a.cmd == "memory":

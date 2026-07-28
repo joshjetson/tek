@@ -226,6 +226,7 @@ that text is handed to the model with the camera frame
 2. [Quick start](#2-quick-start)
 3. [The voice](#3-the-voice) — [all 38 Piper voices](#34-every-english-piper-voice) · [**how to speak (read this first)**](#36-speaking-from-a-shell--the-mouth-harness)
 3b. [**Listening** — the ear](#3b-listening--the-ear)
+3c. [**Barge-in** — you can talk over it](#3c-barge-in--you-can-talk-over-it)
 4. [Architecture](#4-architecture)
 5. [Hardware notes and traps](#5-hardware-notes-and-traps)
 6. [Testing](#6-testing)
@@ -397,6 +398,8 @@ systemd unit. Installation is in [Install](#install), above.
 |---|---|
 | `tek ears` | State: device, wake words, counts, and near-misses with peak levels |
 | `tek ears on` / `off` | The microphone is *closed*, not merely ignored |
+| `tek barge` | Barge-in state: on/off, stops so far, live detector |
+| `tek interrupt` | Stop the current reply now — see [§3c](#3c-barge-in--you-can-talk-over-it) |
 
 **Watching**
 
@@ -1193,6 +1196,87 @@ Every event that gets through is a model call, so:
 
 Decision latency is **~10 s**. That is why the trigger fires on arrival rather
 than waiting for someone to settle, and why `--brain-model` exists.
+
+<sub>[↑ Contents](#contents)</sub>
+
+---
+
+## 3c. Barge-in — you can talk over it
+
+`Gate` feeds silence to the segmenter while the face is speaking, plus a 1.2 s
+tail. Correct for self-hearing — but it also means a 35-second reply cannot be
+stopped, which is the failure a listener notices on the first evening.
+
+```bash
+tek barge            # on/off, how many times it has stopped itself, live state
+tek barge off
+tek interrupt        # stop the current reply now, from a shell
+```
+
+**A detector, not an echo canceller.** Cancelling means reconstructing clean
+near-end speech, which over A2DP means tracking a delay that wanders through a
+codec that is not linear — that is what `module-echo-cancel` and WebRTC AEC
+attempt, and why the tail had to be 1.2 s in the first place. Answering "is a
+second voice present" needs one bit, and one bit survives a crude subtraction:
+
+```
+lag   cross-correlate mic against the outgoing signal, ONCE per utterance
+      (Bluetooth delay is stable within one and unstable between them)
+sub   residual = mic − alpha·reference_aligned, alpha by least squares
+hold  residual above its own floor for >300 ms  ->  somebody is talking
+```
+
+The reference sits in a `TeeSink` beside the speaker, so what gets subtracted
+*is* what is being played — the same property that makes lip-sync structural
+here. Its clock is the playback schedule, not `write()` time, because `pacat`'s
+stdin has no backpressure.
+
+### Measured offline
+
+`tools/bargein_bench.py`. The number that matters is the **false-stop rate** —
+a detector that never misses but stops the reply twice an evening is worse than
+none, because the failure it creates is the one it was built to remove.
+
+| | |
+|---|---|
+| False stops (echo only, 135 trials) | **0** |
+| Missed (echo + a second voice, 81 trials) | **0** |
+| Time to notice | median **300 ms**, p90 440 ms |
+
+Three things that were wrong first, all caught by measurement:
+
+* **The correlation sign was inverted.** The magnitude came out right — 179.9 ms
+  for a true 180 ms — so the estimate *looked* correct while the subtraction was
+  misaligned by twice the lag, putting the whole echo in the residual. Every
+  reply stopped itself.
+* **Measuring the residual against the microphone fails in both directions.**
+  Under a loud reply the mic is dominated by echo, so a quiet interruption never
+  clears the bar (19/81 missed); under a loose alignment the leftover echo *is*
+  the residual, so it clears it with nobody there (8/135 false stops). No single
+  threshold fixes both. The residual's own floor is the honest baseline.
+* **Clocks must be the frame's capture time, not `time.monotonic()`.** Mixing
+  them gave a floor timer that never elapsed in a bench pushing an hour of audio
+  through in a second — 81/81 missed.
+
+### Not yet validated in this room
+
+> ⚠️ **The offline numbers above are not a substitute for the room, and the room
+> test has not passed yet.** On this box the microphone currently reads
+> **0.0044 rms whether or not the speaker is playing — a ratio of 0.99×**. The
+> README elsewhere records the mic picking the speaker up at ~11× ambient, so
+> something in the physical setup has changed. Until that is fixed the detector
+> never locks, and a one-hour false-stop run would report a *false* pass: zero
+> stops because it never ran, not because it was right.
+>
+> `tek interrupt` is unaffected and is verified on hardware — a ~22 s reply
+> stopped at 6.8 s.
+
+That measurement error is also why `MIN_LEVEL` is no longer a constant. It was
+`0.012`, taken from the synthetic bench where echo sits at 0.05–0.15 rms, and it
+rejected **100%** of real frames. An absolute level is a statement about
+somebody else's room, microphone and speaker volume. `Gate` now measures ambient
+continuously — it is the only thing that sees mic frames while nothing is being
+said — and the threshold is a multiple of it.
 
 <sub>[↑ Contents](#contents)</sub>
 

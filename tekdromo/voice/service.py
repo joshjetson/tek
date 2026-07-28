@@ -22,7 +22,7 @@ import traceback
 
 import numpy as np
 
-from . import agent, bus, io as vio, pcm, tts
+from . import agent, bargein, bus, io as vio, pcm, tts
 
 CONFIG = os.path.expanduser("~/.config/tekdromo/voice.json")
 
@@ -292,6 +292,13 @@ class VoiceService(object):
         # you and an API bill, since every event that gets through costs a
         # model call. Deliberately generous by default.
         self.brain = agent.load(brain_model)
+        # Barge-in. `barge` is a live Detector only while an utterance is in
+        # flight; the Gate reaches for it and finds None the rest of the time.
+        self.barge_enabled = True
+        self.barge = None
+        self.barges = 0
+        self.last_barge = None        # its state() at the moment it fired
+        self._interrupt = threading.Event()
         self.watching = True
         # The ear, if there is a microphone. Separate switch from `watching`:
         # "stop watching me" and "stop listening to me" are different requests.
@@ -407,12 +414,24 @@ class VoiceService(object):
         if cmd == "status":
             st = {"ok": True, "voice": self.voice.name,
                   "latency": round(self.latency, 3),
+                  "barges": self.barges,
+                  "barge_enabled": self.barge_enabled,
                   "rate": self.voice.rate, "speaking": self.speaking,
                   "spoken": self.spoken, "load_time": round(self.load_time, 2),
                   "watching": self.watching, "listening": self.listening}
             if self.ears is not None:
                 st["ears"] = self.ears.state()
             return st
+        if cmd == "interrupt":
+            return {"ok": True, "stopped": self.interrupt(msg.get("why", "asked"))}
+
+        if cmd == "barge":
+            if "on" in msg:
+                self.barge_enabled = bool(msg["on"])
+            return {"ok": True, "enabled": self.barge_enabled,
+                    "barges": self.barges, "last": self.last_barge,
+                    "live": None if self.barge is None else self.barge.state()}
+
         if cmd == "ping":
             return {"ok": True}
         return {"ok": False, "error": "unknown command %r" % cmd}
@@ -551,6 +570,23 @@ class VoiceService(object):
             self._say(words)
         except Exception:
             traceback.print_exc()
+
+    def interrupt(self, why="asked"):
+        """Stop the current reply now. Safe to call when nothing is speaking.
+
+        Sets a flag rather than killing anything: both loops in `_say` check it
+        each iteration, so the sink is closed by the thread that owns it and
+        `speaking` is cleared by the code that set it. Reaching in from another
+        thread to close the speaker would race the writer mid-`write`.
+        """
+        if not self.speaking:
+            return False
+        if self.barge is not None:
+            self.last_barge = self.barge.state()
+        self.barges += 1
+        self._interrupt.set()
+        print("interrupted (%s) %s" % (why, self.last_barge or ""), flush=True)
+        return True
 
     def _journal(self, ev, said, spoke, took):
         """Append this event to the memory journal. Never raises.
@@ -704,9 +740,20 @@ class VoiceService(object):
                 return {"ok": False,
                         "error": state["error"] or "voice produced no audio"}
 
+            self._interrupt.clear()
             self.speaking = True
             self.server.publish({"speaking": True, "text": said["text"]})
             sink = vio.SpeakerSink(device=self.device, rate=rate)
+
+            # Barge-in. The reference sits in a Tee beside the speaker, so what
+            # the canceller subtracts IS what is being played rather than a
+            # second copy kept alongside it. Set up before the writer starts:
+            # the Gate may see its first mic frame before the first sample has
+            # even reached the speaker.
+            if self.barge_enabled:
+                ref = bargein.Reference(rate=rate, latency=self.latency)
+                self.barge = bargein.Detector(ref)
+                sink = vio.TeeSink(sink, ref)
 
             # ONE sink for the entire reply. Opening a new one per sentence is
             # what put a gap at every boundary: pacat startup plus the A2DP
@@ -715,6 +762,13 @@ class VoiceService(object):
                 i = 0
                 try:
                     while True:
+                        # Checked here, not only in the mouth loop: this is the
+                        # thread holding the speaker, so stopping it is what
+                        # actually makes the sound stop. Closing the sink in
+                        # `finally` discards whatever pacat has not played,
+                        # which is the flush - there is no way to ask for one.
+                        if self._interrupt.is_set():
+                            break
                         if i < len(frames):
                             sink.write(frames[i])
                             i += 1
@@ -737,6 +791,12 @@ class VoiceService(object):
                 step = pcm.FRAME_MS / 1000.0
                 i = 0
                 while True:
+                    # The mouth must stop with the sound, not after it. Leaving
+                    # it running would have the face carrying on mouthing an
+                    # answer that is no longer audible, which is worse than not
+                    # having stopped at all.
+                    if self._interrupt.is_set():
+                        break
                     if i >= len(envs):
                         if done.is_set():
                             break
@@ -750,6 +810,7 @@ class VoiceService(object):
                     i += 1
             finally:
                 wt.join(timeout=state["audio"] + 30)
+                self.barge = None
                 self.speaking = False
                 # Close the mouth BEFORE announcing speech ended: a consumer
                 # that stops reading at speaking=False would otherwise never

@@ -39,7 +39,7 @@ import traceback
 
 import numpy as np
 
-from . import io as vio, pcm, stt
+from . import bargein, io as vio, pcm, stt
 
 # How long after the wake word to wait for a command, if the wake word arrived
 # on its own. "Hey tek" ... "what time is it" is a normal way to speak; so is
@@ -89,7 +89,18 @@ class Gate(vio.Source):
     Frames are still READ and thrown away rather than simply not read: parec
     keeps producing whether or not anyone is listening, and a reader that
     stalls just builds a backlog which arrives later as a burst of stale audio.
+
+    Muted frames are also where BARGE-IN is decided. The frames are already
+    being read and thrown away, so handing each one to the detector on its way
+    to the bin costs nothing extra and is the only place in the system that
+    holds mic audio captured while the speaker is playing.
     """
+
+    # How long the gate stays open after a barge-in, regardless of `speaking`
+    # or the tail. Without it the interrupted reply's last moments re-arm the
+    # tail and the person's next 1.2 s - the words they interrupted WITH - are
+    # fed to the segmenter as silence, so they have to say it twice.
+    BARGE_OPEN_S = 6.0
 
     def __init__(self, source, service, tail=SPEAK_TAIL):
         self.source = source
@@ -99,6 +110,10 @@ class Gate(vio.Source):
         self.spoke_at = 0.0
         self.muted = 0
         self.frames = 0
+        self.barges = 0
+        self.open_until = 0.0
+        self.ambient = None           # rms of the room with nothing playing
+        self._seen = None             # the detector we last calibrated
         self.last_at = time.monotonic()
 
     def read(self):
@@ -106,13 +121,53 @@ class Gate(vio.Source):
         if frame is None:
             return None
         self.frames += 1
-        self.last_at = time.monotonic()
+        now = time.monotonic()
+        self.last_at = now
+
+        # An interruption already happened: stay open and let the words the
+        # person is still saying reach the segmenter.
+        if now < self.open_until:
+            return frame
+
         if getattr(self.service, "speaking", False):
-            self.until = time.monotonic() + self.tail
-            self.spoke_at = time.monotonic()
-        if time.monotonic() < self.until:
+            self.until = now + self.tail
+            self.spoke_at = now
+            det = getattr(self.service, "barge", None)
+            if det is not None:
+                # Tell it what this room sounds like. The Gate is the only
+                # thing that sees mic frames while NOTHING is being said, so
+                # it is the only place a true ambient level can be measured -
+                # and a detector calibrated on a constant instead of on the
+                # room is a detector that never fires. It did not, for exactly
+                # this reason: a hardcoded 0.012 against a mic reading 0.0044.
+                if det is not self._seen and self.ambient:
+                    det.min_level = max(bargein.MIN_LEVEL_ABS,
+                                        self.ambient * bargein.AMBIENT_MULT)
+                    self._seen = det
+                try:
+                    if det.feed(frame, now):
+                        self.service.interrupt("barge-in")
+                        self.barges += 1
+                        self.until = 0.0
+                        self.open_until = now + self.BARGE_OPEN_S
+                        return frame
+                except Exception:
+                    # A detector fault must not deafen the ear. Falling back to
+                    # the old behaviour - mute while speaking - is exactly what
+                    # this did before barge-in existed, so the failure mode is
+                    # a previous version rather than a broken one.
+                    pass
+
+        if now < self.until:
             self.muted += 1
             return pcm.silence()
+
+        # Not speaking, not muted: this frame IS the room. A slow EMA, because
+        # ambient is a property of the house rather than of the moment, and one
+        # door slamming must not recalibrate the detector.
+        r = float(np.sqrt(np.mean(pcm.to_float(np.asarray(frame)) ** 2)))
+        self.ambient = r if self.ambient is None else (
+            0.995 * self.ambient + 0.005 * r)
         return frame
 
     def close(self):
