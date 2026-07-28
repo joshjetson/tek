@@ -22,7 +22,7 @@ import traceback
 
 import numpy as np
 
-from . import agent, bargein, bus, io as vio, pcm, tts
+from . import agent, bargein, bus, intents, io as vio, pcm, tts
 
 CONFIG = os.path.expanduser("~/.config/tekdromo/voice.json")
 
@@ -294,6 +294,8 @@ class VoiceService(object):
         self.brain = agent.load(brain_model)
         # Barge-in. `barge` is a live Detector only while an utterance is in
         # flight; the Gate reaches for it and finds None the rest of the time.
+        # A two-turn spoken command in progress ("what name?"). See intents.py.
+        self.pending_intent = None
         self.barge_enabled = True
         self.barge = None
         self.barges = 0
@@ -534,6 +536,20 @@ class VoiceService(object):
                                "at": time.time()})
             del self.turns[:-(agent.TURNS_KEPT * 2)]
         t0 = time.time()
+
+        # Commands TEK carries out itself never reach the brain. "Register my
+        # face" is a thing to do, not a thing to have an opinion about, and
+        # sending it costs ~7.5s and an API call to be told nothing useful.
+        if ev.get("kind") == "speech":
+            try:
+                if intents.handle(self, ev):
+                    self._journal(ev, "(carried out a spoken command)", True,
+                                  time.time() - t0)
+                    return
+            except Exception:
+                traceback.print_exc()
+                # Fall through to the brain rather than going silent: a broken
+                # intent must not eat the utterance.
 
         # A spoken question is answered AS IT IS WRITTEN. Anything else waits
         # for the whole reply first: a camera remark is one or two sentences,

@@ -412,6 +412,39 @@ class Tracker:
         with self._lock:
             return self.name
 
+    def aligned_crop(self):
+        """The eye-aligned face, or None. NO fallback, deliberately.
+
+        `crop()` falls back to the raw detector rectangle when landmarks are
+        unavailable, which is right for a HUD panel - a jittery face beats no
+        face on screen. It is wrong for enrolment, and expensively so, because
+        the fallback is silent: the caller gets an image either way and cannot
+        tell which it got.
+
+        Measured cost of not distinguishing them. A guided enrolment that asked
+        for eight head positions - turned, tilted, chin up, chin down - saved 16
+        samples that failed leave-one-out 10 times out of 16, against 0 out of
+        12 for the existing gallery. The poses that make a gallery worth having
+        are exactly the poses a FRONTAL cascade and an LBF fitter handle worst,
+        so every awkward angle fell back to an unaligned rectangle. Three of the
+        16 had no face in them at all.
+
+        So: enrolment takes this, and takes nothing when it returns None. A
+        pose that cannot be captured properly must be retried or skipped, never
+        stored badly - a gallery quietly full of rubbish still reports as an
+        enrolment that worked.
+        """
+        from . import recog
+        with self._lock:
+            pts = None if self.face_pts is None else self.face_pts.copy()
+            frame = self.last_frame
+        if pts is None or frame is None:
+            return None
+        small = cv2.resize(frame, None, fx=self.detect_scale,
+                           fy=self.detect_scale, interpolation=cv2.INTER_AREA)
+        g = cv2.equalizeHist(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY))
+        return recog.align(g, pts)
+
     def crop(self):
         """The face as ENROLMENT should store it - eye-aligned when possible.
 

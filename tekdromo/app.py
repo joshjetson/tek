@@ -437,10 +437,23 @@ class Display:
                     self.cam.snapshot(SNAPSHOT)
                     last_shot = now
                 if self.cam is not None and now - last_crop > CROP_EVERY:
-                    # The display owns the camera, so `tek face enrol` has no
-                    # other way to get a face crop.
+                    # The display owns the camera, so enrolment has no other
+                    # way to get a face crop.
+                    #
+                    # aligned_crop(), NOT crop(): this file is the enrolment
+                    # gallery's only source, and an unaligned sample is worse
+                    # than a missing one. crop() falls back to the raw detector
+                    # rectangle when landmarks fail, which is right for the HUD
+                    # and silently poisonous here - a gallery built from
+                    # fallbacks reports as a successful enrolment and then
+                    # fails to recognise anybody.
+                    #
+                    # Writing nothing when alignment fails is what makes the
+                    # file's mtime meaningful: enrolment waits for a NEW crop,
+                    # so "no fresh crop" now means "that pose could not be
+                    # captured" and it can say so instead of storing rubbish.
                     try:
-                        crop = self.cam.crop()
+                        crop = self.cam.aligned_crop()
                         if crop is not None and crop.size:
                             cv2.imwrite(FACE_CROP, crop)
                     except Exception:
