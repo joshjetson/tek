@@ -116,5 +116,47 @@ else:
     check("augmentation does not hurt an undegraded match",
           r.predict(g0)[1] < 15.0, r.predict(g0)[1])
 
+
+# -- voting: one stray frame must not wipe the label ----------------------
+# "It says unknown" is what a flickering label looks like from across the
+# room, even when most frames are right. The vote is the fix, so it is pinned.
+import time as _time
+
+from tekdromo import camera as _cam
+
+
+def vote(seq):
+    """Run a sequence of per-frame answers through Tracker's voting."""
+    t = _cam.Tracker.__new__(_cam.Tracker)
+    t._lock = __import__("threading").Lock()
+    t._votes = []
+    t._recog = None
+    t._seen_logged = {}
+    out = []
+    for name in seq:
+        t._votes.append((_time.time(), name))
+        del t._votes[:-_cam.VOTE_N]
+        fresh = [n for ts, n in t._votes
+                 if _time.time() - ts <= _cam.VOTE_WINDOW]
+        named = [n for n in fresh if n and n != "UNKNOWN"]
+        out.append((max(set(named), key=named.count)
+                    if len(named) * 2 >= len(fresh) else "UNKNOWN")
+                   if fresh else None)
+    return out
+
+
+check("a steady run of hits reads as the name",
+      vote(["JOSH"] * 5)[-1] == "JOSH", vote(["JOSH"] * 5))
+check("one stray UNKNOWN does not wipe a good run",
+      vote(["JOSH", "JOSH", "JOSH", "UNKNOWN"])[-1] == "JOSH",
+      vote(["JOSH", "JOSH", "JOSH", "UNKNOWN"]))
+check("a steady run of misses does read as UNKNOWN",
+      vote(["UNKNOWN"] * 5)[-1] == "UNKNOWN")
+check("one lucky hit among misses does NOT name someone",
+      vote(["UNKNOWN", "UNKNOWN", "UNKNOWN", "JOSH"])[-1] == "UNKNOWN",
+      vote(["UNKNOWN", "UNKNOWN", "UNKNOWN", "JOSH"]))
+check("recognition is throttled below the detection rate",
+      _cam.IDENTIFY_EVERY >= 0.25, _cam.IDENTIFY_EVERY)
+
 print("RECOG " + ("OK" if not FAIL else "FAILED: " + ", ".join(FAIL)))
 sys.exit(1 if FAIL else 0)

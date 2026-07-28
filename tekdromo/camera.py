@@ -35,6 +35,15 @@ import numpy as np
 DEAD_S = 3.0
 RETRY_S = 1.0
 
+# Recognition runs at most this often, and its answer is decided by a vote over
+# the last few. LBPH costs 7.9 ms and detection runs at 6.7 Hz, so identifying
+# every time spent ~5% of a core re-answering a question whose answer does not
+# change - while making the label flicker whenever a distance sat near the
+# threshold.
+IDENTIFY_EVERY = 0.5
+VOTE_WINDOW = 4.0
+VOTE_N = 8
+
 LANDMARK_MODEL = os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "models", "lbfmodel.yaml")
 
@@ -98,6 +107,8 @@ class Tracker:
         self._seen_logged = {}
         self.face_crop = None       # greyscale crop, for enrolment
         self.face_pts = None        # its landmarks, for alignment
+        self._identified_at = 0.0
+        self._votes = []
         try:
             from . import recog
             self._recog = recog.Recogniser()
@@ -271,7 +282,14 @@ class Tracker:
         # biggest face wins - the nearest person is the one being addressed
         x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
         pts_px = self._fit_landmarks(small, (x, y, fw, fh), now)
-        self._identify(g, (x, y, fw, fh), pts_px)
+        # Recognition is throttled and VOTED, not run per detection. Identity
+        # does not change 6.7 times a second, LBPH costs 7.9 ms a go, and a
+        # distance sitting near the threshold makes a single-frame answer
+        # flicker between a name and UNKNOWN - which is what "it says unknown"
+        # looks like from the sofa even when most frames are right.
+        if now - self._identified_at >= IDENTIFY_EVERY:
+            self._identified_at = now
+            self._identify(g, (x, y, fw, fh), pts_px)
         if self.detections % 40 == 0:
             self._check_gallery()
         cx = (x + fw * 0.5) / small.shape[1]
@@ -357,12 +375,26 @@ class Tracker:
                 name, _dist = self._recog.predict(crop)
         except Exception:
             name = None
+        # Vote over a short window rather than trusting one frame. A name is
+        # only shown once it has won recently, and a single stray UNKNOWN in
+        # the middle of a run of hits no longer wipes the label.
+        self._votes.append((time.time(), name))
+        del self._votes[:-VOTE_N]
+        fresh = [n for t, n in self._votes if time.time() - t <= VOTE_WINDOW]
+        best = None
+        if fresh:
+            named = [n for n in fresh if n and n != "UNKNOWN"]
+            if len(named) * 2 >= len(fresh):        # a majority of them agree
+                best = max(set(named), key=named.count)
+            else:
+                best = "UNKNOWN"
         with self._lock:
             # Store what enrolment should save: the aligned face if we have
             # one, so `tek face enrol` and prediction agree by construction.
             self.face_crop = crop
             self.face_pts = pts_px
-            self.name = name
+            self.name = best
+        name = best
         # Log the sighting, at most once a minute per person: this writes a
         # file, and the detector runs several times a second.
         if name and name != "UNKNOWN":

@@ -758,6 +758,40 @@ an unobtrusive tone would announce itself with a click.
 
 ## 8. Measured results
 
+### Where the time and memory actually go
+
+Profiled rather than guessed, with the house empty:
+
+| | cost |
+|---|---|
+| `phosphor.render_bgra` | **21.75 ms** — 92% of the frame |
+| `geometry.build_pts_culled` (1891 edges) | 1.22 ms |
+| all four HUD panels together | 0.65 ms |
+| `face.update` (the rig) | 0.10 ms |
+| Haar detect / landmark fit / LBPH predict | 22.2 / 11.9 / 7.9 ms, at ≤6.7 Hz |
+
+So the renderer *is* the display, and it is already at its floor — its
+docstring records four optimisations that were measured and did not help,
+including CUDA at 39.1 ms against 21.75 on the CPU. It is memory-bandwidth
+bound at 1024×600, and OpenCV's NEON paths are the limit.
+
+OpenCV threading was checked too: only Haar detect benefits (22.2 ms at four
+threads against 37.8 at one), so cutting the pool would cost more than the
+idle TBB workers do.
+
+Steady state, whole system:
+
+| | |
+|---|---|
+| `tek-display` | 100% of one core, 238 MB, 28.9 fps |
+| `tek-voice` (idle, listening) | **~0% of a core**, 422 MB |
+| `tek-panic` / `tek-bluetooth` | ~0%, 4 MB / 1 MB |
+| load average | 2.6 of 4 cores · 65 °C |
+
+The ear costs essentially nothing while nobody is talking, which is what the
+VAD gate is for. Memory is the binding constraint, as predicted at the start:
+665 MB of product against 1971 MB total.
+
 Nothing in this table is an estimate.
 
 | | |
@@ -809,6 +843,49 @@ tek watch --cooldown 600  # be less talkative
 tek look                  # look right now and decide (manual trigger)
 tek look --force          # ignore the cooldown
 ```
+
+### Why recognition broke on a new camera
+
+It started saying UNKNOWN after the webcam was swapped. Leave-one-out on the
+existing gallery, threshold 62:
+
+```
+median 47.4   p90 61.1   max 62.7   over threshold 1/12
+```
+
+That is the *same person* on the *same camera* already failing one sample in
+twelve. It was living on the edge and nothing measured it.
+
+`tools/face_diag.py` put those faces through what a different camera does:
+
+| what changed | cost in LBPH distance |
+|---|---|
+| gamma, contrast | ~2–9 — nothing, the pipeline equalises |
+| resolution loss | 54–59 |
+| **an 8-pixel shift** | **78–84** |
+
+Never lighting. **Geometry** — and the crop fed to LBPH was the raw Haar
+rectangle, which jitters every frame and sits differently on a different lens.
+
+Two fixes, both measured before being written:
+
+* **Eye alignment.** The 68 landmarks already fitted for the HUD face panel
+  make this free. A 10px shift goes 98.1 → 36.6; the real gallery's worst case
+  goes 62.7 → 52.0, from *above* the threshold to comfortably below.
+* **Training augmentation.** Lower-detail copies of each enrolled face, because
+  the new camera is wider-angle and puts fewer pixels on a face. Third
+  resolution + blur goes 61.0 → 41.4.
+
+Recognition is also **throttled to 2 Hz and voted over a 4-second window**. A
+single stray frame no longer wipes the label — which is what "it says unknown"
+looks like from the sofa even when most frames are right.
+
+`tools/face_realign.py` migrated the existing gallery, measuring before and
+after and refusing to write if alignment had not helped.
+
+**Still worth doing:** re-enrol on the new camera (`tek face enrol JOSH`).
+Alignment and augmentation close most of the gap; samples actually taken
+through this lens would close the rest.
 
 ### Who it thinks people are
 
