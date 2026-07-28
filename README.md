@@ -1298,18 +1298,33 @@ Three things that were wrong first, all caught by measurement:
   them gave a floor timer that never elapsed in a bench pushing an hour of audio
   through in a second — 81/81 missed.
 
-### Not yet validated in this room
+### Validated in the room
 
-> ⚠️ **The offline numbers above are not a substitute for the room, and the room
-> test has not passed yet.** On this box the microphone currently reads
-> **0.0044 rms whether or not the speaker is playing — a ratio of 0.99×**. The
-> README elsewhere records the mic picking the speaker up at ~11× ambient, so
-> something in the physical setup has changed. Until that is fixed the detector
-> never locks, and a one-hour false-stop run would report a *false* pass: zero
-> stops because it never ran, not because it was right.
->
-> `tek interrupt` is unaffected and is verified on hardware — a ~22 s reply
-> stopped at 6.8 s.
+A ~90 second passage, interrupted by a person speaking normally over it:
+
+```
+t=0.0   locked=null                                     heard_ratio 3.32
+t=4.7   locked=true  corr=0.588 cancels=0.383 floor=0.0048 held=70ms
+t=5.0   locked=true                                      held=10ms   <- a gap
+t=5.3   locked=true                                      held=310ms  -> STOPPED
+```
+
+Stopped at **6.5 s** of a passage that would have run about 90. `corr=0.588`
+against the 0.15 needed to lock, and `cancels=0.383` — the aligned reference
+really was removing echo, not just correlating with itself.
+
+The `held_ms` sequence is the design working: **70 → 10 → 310**. The dip is a
+gap in ordinary speech, and the counter *decays* rather than resetting, which is
+why a slow talker still trips it. A reset-on-quiet implementation would have
+started again from zero and never reached 300 ms.
+
+`tek interrupt` is separately verified — a ~22 s reply stopped at 6.8 s.
+
+**Getting here needed the acoustic path fixed first**, and that is why the
+health check exists. Every earlier attempt failed with `corr` peaking at 0.12,
+which reads identically to "the threshold is too strict" and is actually "there
+is no echo to correlate against". `tek ears` now reports the ratio directly —
+this run measured 3.3–4.3× while speaking.
 >
 > **`tek ears` now reports this.** The fault took a hand-built experiment to
 > find, because every software layer says healthy: paired, A2DP up at 52 ms,
