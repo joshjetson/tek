@@ -76,6 +76,7 @@ You watch the room, and you can speak out loud through a speaker.
 WHAT HAPPENED: %(what)s
 Time: %(when)s. Faces detected: %(faces)d.
 %(history)s
+%(memory)s
 %(people)s
 %(look)s
 %(lean)s
@@ -154,13 +155,37 @@ def _find_claude():
 
 
 def people_notes():
-    """Who lives here, in the user's own words. Optional."""
+    """Who lives here, in the user's own words. Optional.
+
+    Still authoritative, and deliberately not replaced by the journal: a
+    description somebody wrote on purpose beats anything inferred from a
+    transcript. The journal adds what a person should not have to maintain by
+    hand - see memory_notes().
+    """
     try:
         with open(PEOPLE) as f:
             text = f.read().strip()
         return ("WHO LIVES HERE (use this to recognise faces):\n" + text
                 if text else "")
     except IOError:
+        return ""
+
+
+def memory_notes(event):
+    """What TEK remembers that bears on this event. Empty string if nothing.
+
+    Wrapped in a bare except on purpose. This runs on the path where somebody
+    has just spoken and is waiting for an answer, and there is no version of
+    "the journal is unhappy" that should become silence in front of them.
+    Measured at 33 ms median for the full block against 10,005 rows, against a
+    model call of ~7.5 s - so it is never the thing worth failing over.
+    """
+    try:
+        from .. import memory
+        return memory.context(event)
+    except Exception as e:                       # pragma: no cover
+        print("brain: memory unavailable (%s: %s)" % (type(e).__name__, e),
+              flush=True)
         return ""
 
 
@@ -272,6 +297,7 @@ class ClaudeBrain(Brain):
             "when": event.get("when", time.strftime("%A %H:%M")),
             "faces": event.get("faces", 0),
             "history": hist,
+            "memory": memory_notes(event),
             "people": people_notes(),
             "look": look,
             "silence": SILENCE,

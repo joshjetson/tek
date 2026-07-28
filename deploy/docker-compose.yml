@@ -1,0 +1,60 @@
+# Postgres for TEK's memory journal.
+#
+# Docker rather than apt because this box is Ubuntu 18.04: bionic's apt has only
+# Postgres 10, and PGDG dropped bionic entirely (dists/bionic-pgdg/ is a 404).
+# The journal schema uses a STORED generated tsvector column, which needs 12+.
+#
+# postgres:17-alpine, not pgvector/pgvector:pg17 — TEK's retrieval is FTS + GIN
+# with no embeddings, on purpose. A 2GB board should not hold a vector index in
+# RAM to answer "what did we talk about yesterday".
+#
+# Compose file format 2.3, NOT 3.x: docker-compose on this box is 1.17.1, and
+# v2 is also the last format where mem_limit/cpu_shares work without swarm —
+# which is the whole point here. RAM is the binding constraint on a 2GB board
+# shared with a display that must hold 29fps.
+version: '2.3'
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: tek_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tek
+      POSTGRES_PASSWORD: tek
+      POSTGRES_DB: tek
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    # 5433 on the host, bound to loopback only: the journal is a record of who
+    # was home and what was said in the house. It has no business on the LAN.
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - tek_pgdata:/var/lib/postgresql/data
+    # Tuned DOWN hard. Defaults assume a server with the machine to itself.
+    # synchronous_commit=off is safe for this workload: the journal is an
+    # append-only record of remarks, and losing the last few hundred ms of it in
+    # a power cut costs nothing worth a page flush per insert.
+    command: >
+      postgres
+      -c shared_buffers=32MB
+      -c max_connections=12
+      -c work_mem=2MB
+      -c maintenance_work_mem=32MB
+      -c effective_cache_size=256MB
+      -c max_wal_size=256MB
+      -c wal_compression=on
+      -c synchronous_commit=off
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tek -d tek"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # A hard ceiling, not a suggestion. If the journal ever tries to grow into
+    # the display's memory it gets OOM-killed and restarted instead, which is
+    # the correct trade: the face must never stop, the journal may.
+    mem_limit: 256m
+    # The display gets the CPU. Nothing here is ever on a frame path.
+    cpu_shares: 256
+
+volumes:
+  tek_pgdata:

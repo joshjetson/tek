@@ -144,7 +144,8 @@ the camera.
 | **Audio** | Any PulseAudio sink. Bluetooth A2DP works; wired is easier. |
 | **Mic** | Any PulseAudio source (the reference build uses the webcam's). |
 | **Python** | 3.6+ (this box is pinned at 3.6.9, so the code avoids anything newer) |
-| **Packages** | `numpy`, `opencv` **with contrib** (`cv2.face` is required), `onnxruntime`, `vosk`, `webrtcvad` |
+| **Packages** | `numpy`, `opencv` **with contrib** (`cv2.face` is required), `onnxruntime`, `vosk`, `webrtcvad`, `psycopg2` |
+| **Memory journal** | Docker + Postgres 12+ (`deploy/docker-compose.yml`). Optional — TEK runs without it, with no memory. |
 | **Binaries** | `espeak-ng`, PulseAudio (`pactl`/`parec`/`pacat`), and a model CLI |
 | **Model** | [Claude Code](https://claude.com/claude-code) CLI by default — swap it for any command that takes a prompt and prints a reply |
 | **RAM** | 665 MB in steady state, all three services running |
@@ -179,6 +180,10 @@ unzip -q m.zip -d models/ && rm m.zip     # ~68MB, speech recognition
 # themselves off silently, with no error anywhere.
 curl -sSL -o models/lbfmodel.yaml \
   https://raw.githubusercontent.com/kurnianggoro/GSOC2017/master/data/lbfmodel.yaml
+
+# the memory journal (optional, but see §9b - without it TEK has no memory)
+(cd deploy && docker-compose up -d)
+tek memory migrate
 
 # the four services
 sudo cp services/*.service /etc/systemd/system/
@@ -227,6 +232,7 @@ that text is handed to the model with the camera frame
 7. [Services](#7-services)
 8. [Measured results](#8-measured-results)
 9. [The camera can prompt me](#9-the-camera-can-prompt-me)
+9b. [**Memory** — it remembers](#9b-memory--it-remembers)
 10. [Extending TEK — sensors, Home Assistant, robotics](#10-extending-tek--sensors-home-assistant-robotics)
 11. [Privacy, consent and what this is not](#11-privacy-consent-and-what-this-is-not)
 12. [Collaborating](#12-collaborating)
@@ -417,6 +423,19 @@ systemd unit. Installation is in [Install](#install), above.
 | `tek keepalive` | Interval, tone, how many sent, idle time |
 | `tek keepalive --every 300` | Less often · `--every 0` disables |
 | `tek keepalive --hz 200 --amp 0.02 --secs 0.25` | Tune for your speaker |
+
+**Memory** — see [§9b](#9b-memory--it-remembers)
+
+| | |
+|---|---|
+| `tek memory status` | Is the journal up, how many entries, how far back |
+| `tek memory recent` | The last 24 hours |
+| `tek memory search TERMS` | Ranked recall, with scores |
+| `tek memory note NAME …` | Remember a durable fact about someone |
+| `tek memory forget NAME` | Transcript and notes, both |
+| `tek memory prune [DAYS]` | Retention is a privacy control |
+| `tek memory migrate` | Apply outstanding migrations (idempotent) |
+| `tek recap` | One spoken sentence about the day |
 
 **Getting out**
 
@@ -889,6 +908,7 @@ for t in tests/*.py; do python3 "$t"; done
 | `panic_unit.py` | the escape hatch, incl. a **real uinput keyboard** | root for the last part |
 | `voice_ears.py` | the self-hearing gate, wake/command logic, misheard wake words | none |
 | `voice_lipsync.py` | reads `/dev/fb0` while really speaking | display + voice |
+| `memory_unit.py` | stopwords, query building, decay, budget, migration checksums, and that a dead journal degrades rather than raises | none (the Postgres half self-skips) |
 
 Three are disruptive and therefore live in `tools/`, not `tests/`:
 
@@ -1173,6 +1193,127 @@ Every event that gets through is a model call, so:
 
 Decision latency is **~10 s**. That is why the trigger fires on arrival rather
 than waiting for someone to settle, and why `--brain-model` exists.
+
+<sub>[↑ Contents](#contents)</sub>
+
+---
+
+## 9b. Memory — it remembers
+
+Recognising you by name and having no idea you spoke that morning is more
+uncanny than not recognising you at all: it reads as a security camera with a
+voice rather than as a presence. So every event and every reply is journalled,
+and a retrieval slice is injected into the next prompt.
+
+```bash
+tek memory status            # is the journal up, how many entries, how far back
+tek memory recent            # the last 24 hours
+tek memory search boiler     # ranked recall, with scores
+tek memory note JOSH prefers the heating off overnight
+tek memory forget JOSH       # transcript and notes, both
+tek memory prune 400         # retention is a privacy control
+tek recap                    # one spoken sentence about the day
+```
+
+### Postgres, in a container, tuned down hard
+
+`deploy/docker-compose.yml`. Docker rather than apt because bionic ships
+Postgres 10 and **PGDG dropped bionic entirely** (`dists/bionic-pgdg/` is a
+404), while the schema needs 12+ for a `GENERATED ALWAYS AS … STORED` column.
+
+Bound to loopback on port 5433. This database records who was home and what was
+said in the house; it has no business on the LAN.
+
+| | measured on this box |
+|---|---|
+| Postgres RSS | **29.6 MB** (capped at 256 MB via `mem_limit`) |
+| `dockerd` RSS | 40 MB |
+| Display, before | 28.9 fps |
+| Display, after | **28.3 fps** — a 2% cost, invariant holds |
+
+`mem_limit` is a hard ceiling on purpose: if the journal ever grows into the
+display's memory it gets OOM-killed and restarted, which is the correct trade.
+The face must never stop; the journal may.
+
+### Retrieval blends three signals
+
+Any one alone is visibly wrong. **Recency** alone is a scrollback — ask "what
+did we decide about the boiler" and it hands over the last four things said,
+none of which are the boiler. **Relevance** alone is a search engine — say
+"morning" and it surfaces a greeting from March, which is worse than no memory
+because it is confidently irrelevant. **Person** alone conflates the household.
+
+So `ts_rank` is decayed by age (`exp(-age/14 days)`), the current speaker's rows
+get a 1.6× boost, recent turns are taken by time, the two sets are deduped, and
+the whole thing is capped at ~1200 characters — because a prompt is paid for on
+every single call.
+
+**No embeddings, deliberately.** Vector search would need a model resident in
+the 2 GB this board also renders a face out of, to answer questions over a table
+gaining a few dozen rows a day.
+
+```
+                      measured against 10,005 rows (a year of household traffic)
+  recent()      2.1 ms median
+  relevant()   27.2 ms median
+  context()    33.1 ms median   <- the whole block, against a ~7.5s model call
+```
+
+### Two things that were measured, not assumed
+
+**The 90-day horizon is an optimisation that cannot change an answer.** At 90
+days the decay factor is `exp(-90/14) = 0.0016`, so such a row needs 619× the
+rank of a fresh one to place. Verified rather than argued — top-4 and top-10
+results are identical with and without it across broad, narrow and rare queries.
+What it buys is the plan:
+
+| query | plan | time |
+|---|---|---|
+| broad OR, no window | Seq Scan | 76.3 ms |
+| broad OR, 90-day window | Bitmap Heap Scan | **19.8 ms** |
+
+Without it the planner sequential-scans even for a rare term, because the whole
+table is 7 MB and fits in `shared_buffers` — defensible, but it makes cost grow
+with *total* history rather than *recent* history.
+
+**Apostrophes are token separators, and the query side has to agree.**
+`ts_debug('simple', "the boiler's temperature")` shows `boiler` and `s` as
+separate `asciiword` tokens with the apostrophe as a `blank`. Treating
+`boiler's` as one term produced `to_tsquery('simple', "boiler's:*")` →
+`'boiler':* <-> 's':*`, a phrase query, which is stricter than intended. The
+tokeniser in `recall.terms()` now splits the same way Postgres does. A unit test
+holds it there.
+
+### Schema and migrations
+
+Following the conventions in `vog`: a `search_fts` STORED generated tsvector
+with weighted buckets, `'simple'` regconfig (immutable, so the generated column
+is legal, and matching the `term:*` prefix queries), and a GIN index.
+
+`tekdromo/memory/migrate.py` is ~150 lines: numbered `.sql` files applied in
+order, recorded in `schema_migration`. Not Liquibase — that is the right answer
+for `vog`, a Grails app with a team, and absurd on a 2 GB board with two tables.
+Three properties it does have:
+
+* **Each migration is its own transaction.** Postgres does transactional DDL, so
+  a failure leaves you on the last good version rather than half-applied.
+* **Applied migrations are checksummed**, whitespace-insensitively. Editing a
+  file that already ran is how two machines silently diverge; here it fails loud
+  and tells you to write a new migration. Reindenting does *not* trip it — an
+  alarm that cries wolf is an alarm people learn to ignore.
+* **It is idempotent**, so it is safe to run on every start.
+
+### It degrades, loudly
+
+Postgres being absent, stopped, or un-migrated has to mean "TEK has no memory
+right now", never a stack trace on the path answering a person. Every call is
+wrapped; `tek-voice` `Wants=` docker rather than `Requires=` it.
+
+But the failure is **logged**, and kept on `last_error` for `tek memory status`.
+This project has already paid for the alternative once: returning None silently
+made a broken brain indistinguishable from a thoughtful silence
+([§9](#9-the-camera-can-prompt-me)). Quiet degradation is the bug, not the
+feature.
 
 <sub>[↑ Contents](#contents)</sub>
 

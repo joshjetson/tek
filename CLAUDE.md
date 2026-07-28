@@ -106,6 +106,22 @@ itself as well as returning words to speak.
   `[Service]` it is silently ignored. Drop-ins apply in lexicographic *filename*
   order across all directories — `/etc` does not automatically beat `/lib`.
 
+## Memory lives in Postgres, in a container
+
+`tekdromo/memory/`, backed by `deploy/docker-compose.yml` on port 5433. Bring it
+up with `docker-compose up -d` then `tek memory migrate`. See
+[README §9b](README.md#9b-memory--it-remembers).
+
+Two rules:
+
+* **A dead journal must never break the face.** Everything in `memory/` degrades
+  to "no memory" and returns a default rather than raising — but it *logs*, and
+  keeps `last_error` for `tek memory status`. Silent degradation is the bug; the
+  brain-returning-None-quietly incident is why.
+* **Do not import the submodules by their short names.** `from tekdromo.memory
+  import migrate` gives you the convenience *function*, not the module — the
+  package exports `migrate_mod`, `db_mod`, `recall_mod`, `store_mod` for that.
+
 ## Do not break the display
 
 `tek-display` renders at ~30 fps and the project's central invariant is that it

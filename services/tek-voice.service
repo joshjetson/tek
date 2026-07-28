@@ -1,7 +1,11 @@
 [Unit]
 Description=TEKDROMO voice service (TTS, speaker, mouth stream)
-After=sound.target tek-bluetooth.service
-Wants=tek-bluetooth.service
+After=sound.target tek-bluetooth.service docker.service
+# Wants, not Requires, for docker: the memory journal lives in a container, and
+# a journal that is down must degrade to "TEK has no memory" rather than stop
+# the voice. Requires would make a Postgres problem into a mute face, which is
+# exactly backwards - see tekdromo/memory/db.py.
+Wants=tek-bluetooth.service docker.service
 # Same reasoning as tek-display: must keep retrying forever. On systemd 237
 # these belong in [Unit], not [Service], where they are silently ignored.
 StartLimitIntervalSec=0

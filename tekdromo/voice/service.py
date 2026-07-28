@@ -536,6 +536,7 @@ class VoiceService(object):
         if not words:
             print("event %s: stayed quiet (%.1fs)" % (ev.get("kind"), took),
                   flush=True)
+            self._journal(ev, None, False, took)
             return
         self.events_acted += 1
         self.recent.append(words)
@@ -545,10 +546,32 @@ class VoiceService(object):
         self.last_spoke = time.time()
         print("event %s: saying %r (decided in %.1fs)"
               % (ev.get("kind"), words[:60], took), flush=True)
+        self._journal(ev, words, True, took)
         try:
             self._say(words)
         except Exception:
             traceback.print_exc()
+
+    def _journal(self, ev, said, spoke, took):
+        """Append this event to the memory journal. Never raises.
+
+        Called on BOTH outcomes, including silence. A journal that records only
+        what was said cannot answer "has it seen anyone today", and cannot
+        distinguish restraint from a brain that is failing - which is the exact
+        ambiguity that cost real debugging time on this path.
+
+        The failure is swallowed but printed. A silent failure here would leave
+        TEK apparently remembering nothing with no indication why.
+        """
+        try:
+            from .. import memory
+            memory.record(ev, said=said, spoke=spoke,
+                          decided_ms=int(took * 1000),
+                          model=getattr(self.brain, "model", None)
+                                or agent.DEFAULT_BRAIN_MODEL)
+        except Exception as e:
+            print("memory: not journalled (%s: %s)" % (type(e).__name__, e),
+                  flush=True)
 
     def _answered(self, words):
         """Attach our reply to the turn it answers, completing the exchange."""
@@ -578,11 +601,13 @@ class VoiceService(object):
         if not words:
             print("event speech: stayed quiet (%.1fs)" % (time.time() - t0),
                   flush=True)
+            self._journal(ev, None, False, time.time() - t0)
             return False
         self.events_acted += 1
         self.recent.append(words)
         del self.recent[:-5]
         self._answered(words)
+        self._journal(ev, words, True, time.time() - t0)
         self.last_spoke = time.time()
         print("event speech: first word %.1fs, whole answer %.1fs, %d chars: %s"
               % (first["at"] or -1, time.time() - t0, len(words), words[:60]),

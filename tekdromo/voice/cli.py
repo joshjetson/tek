@@ -124,6 +124,21 @@ def main(argv=None):
     p = sub.add_parser("ears", help="continuous listening: state, on, or off")
     p.add_argument("state", nargs="?", choices=["on", "off"], default=None)
 
+    p = sub.add_parser("memory", help="the journal: what TEK remembers")
+    p.add_argument("action", nargs="?",
+                   choices=["status", "migrate", "recent", "search", "note",
+                            "forget", "prune"],
+                   default="status")
+    p.add_argument("rest", nargs="*",
+                   help="search: the terms. note: NAME the note text. "
+                        "forget: NAME. prune: days.")
+
+    p = sub.add_parser("recap",
+                       help="one spoken sentence about the day so far")
+    p.add_argument("--hours", type=float, default=24.0)
+    p.add_argument("--quiet", action="store_true",
+                   help="print it instead of speaking it")
+
     p = sub.add_parser("panic",
                        help="stop the display and hand the console back")
     p.add_argument("what", nargs="?", choices=["stop", "quiet"], default="stop",
@@ -366,6 +381,131 @@ def main(argv=None):
         recog.note_enrolled(name, len(recog.samples(name)))
         print("  enrolled %s with %d samples; the display picks it up within "
               "a few seconds" % (name, got))
+        return 0
+
+    if a.cmd == "memory":
+        # Deliberately NOT routed through the voice service. The journal is
+        # readable without it, and `tek memory status` is exactly what you
+        # reach for when the service is the thing that is unhappy.
+        from .. import memory
+        from ..memory import recall as _recall
+        rest = " ".join(a.rest).strip()
+
+        if a.action == "migrate":
+            n = memory.migrate()
+            return 1 if n < 0 else 0
+
+        if a.action == "status":
+            ok, detail = memory.ready()
+            print("  journal    %s" % ("ready" if ok else "NOT READY"))
+            print("  detail     %s" % detail)
+            print("  dsn        %s" % memory.db.dsn())
+            if ok:
+                cnt = memory.counts() or {}
+                print("  entries    %s (%s spoken)"
+                      % (cnt.get("entries"), cnt.get("spoken")))
+                print("  people     %s" % cnt.get("people"))
+                print("  notes      %s" % cnt.get("notes"))
+                if cnt.get("since"):
+                    print("  spans      %s -> %s"
+                          % (cnt["since"].strftime("%Y-%m-%d %H:%M"),
+                             cnt["latest"].strftime("%Y-%m-%d %H:%M")))
+            return 0 if ok else 1
+
+        if a.action == "recent":
+            rows = _recall.day(hours=24, limit=30)
+            if not rows:
+                print("  nothing in the last 24 hours")
+                return 0
+            for r in rows:
+                print("  %s  %-9s %-8s %s"
+                      % (r["at"].strftime("%H:%M"), r["kind"],
+                         r["person"] or "-",
+                         (r["heard"] or r["what"] or "")[:48]))
+                if r["said"]:
+                    print("  %-5s %-9s %-8s -> %s" % ("", "", "", r["said"][:60]))
+            return 0
+
+        if a.action == "search":
+            if not rest:
+                sys.stderr.write("need something to search for\n")
+                return 1
+            rows = _recall.relevant(rest, limit=10)
+            if not rows:
+                print("  nothing matched %r" % rest)
+                return 0
+            for r in rows:
+                print("  %6.4f  %s  %-8s %s"
+                      % (r["score"], r["at"].strftime("%Y-%m-%d %H:%M"),
+                         r["person"] or "-",
+                         (r["heard"] or r["what"] or "")[:44]))
+            return 0
+
+        if a.action == "note":
+            if len(a.rest) < 2:
+                sys.stderr.write("usage: tek memory note NAME the note text\n")
+                return 1
+            who, text = a.rest[0], " ".join(a.rest[1:])
+            ok = memory.note(who, text, source="manual")
+            print("  noted against %s" % who.upper() if ok
+                  else "  could not write the note")
+            return 0 if ok else 1
+
+        if a.action == "forget":
+            if not rest:
+                sys.stderr.write("usage: tek memory forget NAME\n")
+                return 1
+            j, n = memory.forget(rest)
+            print("  forgot %s - %d journal entries, %d notes"
+                  % (rest.upper(), j, n))
+            return 0
+
+        if a.action == "prune":
+            days = int(rest) if rest.isdigit() else 400
+            n, e = memory.prune(days)
+            print("  pruned %d entries older than %d days, %d expired notes"
+                  % (n, days, e))
+            return 0
+
+    if a.cmd == "recap":
+        # The whole point of the journal, in one command: not a log dump but a
+        # sentence a person would actually say. The summarising is the model's
+        # job - this only gathers the rows and routes the reply to the speaker.
+        from ..memory import recall as _recall
+        rows = _recall.day(hours=a.hours)
+        if not rows:
+            msg = "Nothing has happened in the last %g hours." % a.hours
+            print("  " + msg)
+            return 0
+        lines = []
+        for r in rows:
+            when = r["at"].strftime("%H:%M")
+            who = r["person"] or "someone"
+            if r.get("heard"):
+                lines.append("%s %s asked: %s" % (when, who, r["heard"]))
+            if r.get("said"):
+                lines.append("%s you said: %s" % (when, r["said"]))
+            if not r.get("heard") and not r.get("said") and r.get("what"):
+                lines.append("%s %s" % (when, r["what"]))
+        c = _client(a.socket, timeout=180.0)
+        if c is None:
+            return 1
+        r = c.request({"cmd": "event", "event": {
+            "kind": "manual",
+            "what": ("you have been asked to recap the last %g hours out loud. "
+                     "Here is what happened, oldest first:\n%s\n\n"
+                     "Summarise it as one or two spoken sentences - what "
+                     "mattered, who was about. Do not list it back."
+                     % (a.hours, "\n".join(lines[-60:]))),
+            "faces": 0,
+        }}) or {}
+        c.close()
+        if a.quiet:
+            print("  %d entries in the last %g hours" % (len(rows), a.hours))
+        elif r.get("acted"):
+            print("  recapping out loud...")
+        else:
+            print("  did not recap: %s" % r.get("reason"))
         return 0
 
     if a.cmd == "status":

@@ -409,6 +409,15 @@ class Display:
                     shot = self.cam.snapshot(SNAPSHOT)
                     if shot:
                         ev["image"] = shot
+                # Who the recogniser settled on, for the journal and for the
+                # per-person half of recall. Read here rather than in _watch
+                # because _watch runs on the frame loop and this is a voted
+                # label that is still settling at the instant of arrival - by
+                # the time the snapshot is taken it has had its 4-second window.
+                if self.cam is not None:
+                    who = getattr(self.cam, "name", None)
+                    if who and who != "UNKNOWN":
+                        ev["person"] = who
                 ev["when"] = time.strftime("%A %H:%M")
                 c = bus.Client(bus.DEFAULT_PATH, timeout=10)
                 c.send({"cmd": "event", "event": ev})
