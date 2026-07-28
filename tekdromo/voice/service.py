@@ -302,6 +302,10 @@ class VoiceService(object):
         self.last_event = 0.0
         self.last_spoke = 0.0
         self.recent = []
+        # The conversation itself: what was heard AND what was answered.
+        # `recent` only ever held our own half, so a follow-up question had
+        # nothing to resolve against.
+        self.turns = []
         self.events_seen = 0
         self.events_acted = 0
         cfg = load_settings()
@@ -501,6 +505,15 @@ class VoiceService(object):
         ev["last_spoken_ago"] = (time.time() - self.last_spoke
                                  if self.last_spoke else None)
         ev["recent"] = list(self.recent)
+        # Drop stale turns before handing them over. A conversation from this
+        # morning is not context, it is confusion.
+        cutoff = time.time() - agent.TURN_MAX_AGE
+        self.turns = [t for t in self.turns if t.get("at", 0) > cutoff]
+        ev["turns"] = [dict(t) for t in self.turns[-agent.TURNS_KEPT:]]
+        if ev.get("kind") == "speech" and ev.get("heard"):
+            self.turns.append({"heard": ev["heard"], "said": None,
+                               "at": time.time()})
+            del self.turns[:-(agent.TURNS_KEPT * 2)]
         t0 = time.time()
 
         # A spoken question is answered AS IT IS WRITTEN. Anything else waits
@@ -527,6 +540,8 @@ class VoiceService(object):
         self.events_acted += 1
         self.recent.append(words)
         del self.recent[:-5]
+        if ev.get("kind") == "speech":
+            self._answered(words)
         self.last_spoke = time.time()
         print("event %s: saying %r (decided in %.1fs)"
               % (ev.get("kind"), words[:60], took), flush=True)
@@ -534,6 +549,14 @@ class VoiceService(object):
             self._say(words)
         except Exception:
             traceback.print_exc()
+
+    def _answered(self, words):
+        """Attach our reply to the turn it answers, completing the exchange."""
+        for t in reversed(self.turns):
+            if t.get("said") is None:
+                t["said"] = words
+                return
+        self.turns.append({"heard": None, "said": words, "at": time.time()})
 
     def _stream_reply(self, ev, t0):
         """Speak a reply as the model writes it. True if anything was said.
@@ -559,6 +582,7 @@ class VoiceService(object):
         self.events_acted += 1
         self.recent.append(words)
         del self.recent[:-5]
+        self._answered(words)
         self.last_spoke = time.time()
         print("event speech: first word %.1fs, whole answer %.1fs, %d chars: %s"
               % (first["at"] or -1, time.time() - t0, len(words), words[:60]),

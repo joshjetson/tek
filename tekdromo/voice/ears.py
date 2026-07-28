@@ -31,6 +31,7 @@ of it. Running the cheap one always and the expensive one rarely is what makes
 continuous listening affordable on four A57 cores that are already drawing a
 face at 30 fps.
 """
+import collections
 import os
 import threading
 import time
@@ -44,6 +45,13 @@ from . import io as vio, pcm, stt
 # on its own. "Hey tek" ... "what time is it" is a normal way to speak; so is
 # saying both in one breath, which is handled without waiting at all.
 WAKE_WINDOW = 8.0
+
+# After it finishes speaking, keep listening this long WITHOUT the wake word.
+# People do not say "hey tek" before every sentence of a conversation, and
+# making them is most of why this felt like operating a machine rather than
+# talking to something. Short enough that the room's ordinary chatter a minute
+# later is not taken as addressed to it.
+FOLLOWUP_S = 12.0
 
 # Silence fed to the segmenter after the last sample is written, covering the
 # speaker's own buffer and the room's reverb tail. A2DP alone is 150-250 ms.
@@ -88,6 +96,7 @@ class Gate(vio.Source):
         self.service = service
         self.tail = tail
         self.until = 0.0
+        self.spoke_at = 0.0
         self.muted = 0
         self.frames = 0
         self.last_at = time.monotonic()
@@ -100,6 +109,7 @@ class Gate(vio.Source):
         self.last_at = time.monotonic()
         if getattr(self.service, "speaking", False):
             self.until = time.monotonic() + self.tail
+            self.spoke_at = time.monotonic()
         if time.monotonic() < self.until:
             self.muted += 1
             return pcm.silence()
@@ -107,6 +117,77 @@ class Gate(vio.Source):
 
     def close(self):
         self.source.close()
+
+
+class Draining(vio.Source):
+    """Reads the microphone in its own thread so nothing downstream can stall it.
+
+    This is the difference between a conversation and a device that ignores
+    you. Recognition is NOT faster than real time on this board - measured on
+    the small model:
+
+        "hey tek"                            0.7s audio -> 1.47s to decode (2.10x)
+        "what is the capital of france"      1.8s audio -> 2.38s (1.34x)
+        "explain how a rainbow works ..."    2.5s audio -> 2.51s (0.99x)
+
+    and parec's pipe holds 65536 bytes, which is 2.05 seconds. So decoding
+    inline meant that for the whole time it was thinking about what you just
+    said, it was deaf - and the buffer holding your next sentence overflowed
+    while it worked. That produced exactly the reported symptoms: nothing heard
+    right after the wake word, replies missed at random, and then an answer to
+    something said minutes earlier arriving out of nowhere, because what
+    finally got decoded was stale audio.
+
+    A bounded deque drops the OLDEST frames when the consumer falls hopelessly
+    behind. Losing old audio is right: stale speech answered late is worse than
+    silence, which is the failure this replaces.
+    """
+
+    def __init__(self, source, seconds=12.0):
+        self.source = source
+        self.max = max(8, int(seconds * 1000 / pcm.FRAME_MS))
+        self.q = collections.deque(maxlen=self.max)
+        self.dropped = 0
+        self.deepest = 0
+        self._run = True
+        self._ended = False
+        self._t = threading.Thread(target=self._pump)
+        self._t.daemon = True
+        self._t.start()
+
+    def _pump(self):
+        try:
+            while self._run:
+                f = self.source.read()
+                if f is None:
+                    break
+                if len(self.q) == self.max:
+                    self.dropped += 1
+                self.q.append(f)
+                self.deepest = max(self.deepest, len(self.q))
+        finally:
+            self._ended = True
+
+    def read(self):
+        while self._run:
+            try:
+                return self.q.popleft()
+            except IndexError:
+                if self._ended:
+                    return None
+                time.sleep(0.005)
+        return None
+
+    def backlog(self):
+        """Seconds of audio waiting to be processed."""
+        return len(self.q) * pcm.FRAME_MS / 1000.0
+
+    def close(self):
+        self._run = False
+        try:
+            self.source.close()
+        except Exception:
+            pass
 
 
 class Ears(object):
@@ -141,6 +222,7 @@ class Ears(object):
         self.misses = []
         self._src = None
         self._gate = None
+        self._drain = None
 
     # -- lifecycle ---------------------------------------------------------
     def start(self):
@@ -217,8 +299,12 @@ class Ears(object):
                 self.listening_since = time.time()
                 print("ears: listening to %s (mic open #%d)"
                       % (device, self.opens), flush=True)
+                # Gate FIRST, then drain: the mute decision has to be made
+                # when the audio is captured, not when it is finally read, or
+                # everything buffered during a reply comes out unmuted.
                 self._gate = Gate(src, self.service)
-                for utt in self.seg.segments(self._gate):
+                self._drain = Draining(self._gate)
+                for utt in self.seg.segments(self._drain):
                     if not self._run:
                         break
                     self._utterance(utt)
@@ -229,7 +315,12 @@ class Ears(object):
             except Exception:
                 traceback.print_exc()
             finally:
-                self._src, self._gate = None, None
+                if self._drain is not None:
+                    try:
+                        self._drain.close()
+                    except Exception:
+                        pass
+                self._src, self._gate, self._drain = None, None, None
                 if src is not None:
                     try:
                         src.close()
@@ -281,14 +372,34 @@ class Ears(object):
         self.utterances += 1
         secs = len(samples) / float(pcm.RATE)
 
+        # Just answered someone? Then the next thing said is almost certainly
+        # a reply, and demanding the wake word again before every single
+        # sentence is the main reason this did not feel like a conversation.
+        gate = self._gate
+        if (gate is not None and gate.spoke_at
+                and time.monotonic() - gate.spoke_at < FOLLOWUP_S
+                and time.monotonic() >= self.armed_until):
+            self.armed_until = time.monotonic() + self.window
+
         if time.monotonic() < self.armed_until:
             # Already woken: this is the command, whatever it is.
             text = self.free.transcribe(samples)
-            self.armed_until = 0.0
-            if text:
+            # Saying the wake word twice is a normal thing to do when the
+            # first one seemed to go unheard. Dispatching the second one as
+            # the question gets an answer to "hey tek", which is nonsense.
+            if text and not stt.wake_only(text):
+                self.armed_until = 0.0
                 self._command(text, secs)
             else:
-                print("ears: armed, but heard nothing usable", flush=True)
+                # Do NOT disarm. The window belongs to the person, not to the
+                # first scrap of audio that happens to land in it - and after a
+                # reply the first thing segmented is often the tail of the
+                # room settling, which decodes to nothing. Spending the arm on
+                # that meant the actual follow-up arrived to a closed door,
+                # which is precisely "sometimes it hears us, sometimes it
+                # doesn't".
+                print("ears: armed, ignoring %r - still listening for %.0fs"
+                      % (text, self.armed_until - time.monotonic()), flush=True)
             return
 
         # The cheap pass. This grammar can only return the wake phrases or
@@ -320,9 +431,20 @@ class Ears(object):
             return
         self.wakes += 1
 
-        # Woken - now a full decode of the SAME audio, in case the command came
-        # in the same breath ("hey tek what time is it"), which is how people
-        # actually talk.
+        # Was there anything AFTER the wake word? The grammar already knows:
+        # it emits "hey tek" for the wake word alone and "hey tek [unk]" when
+        # more was said. Asking it costs nothing and saves a free decode -
+        # measured at 1.47s for a 0.7s utterance, paid at the exact moment
+        # somebody has just said "hey tek" and is about to start talking. That
+        # was most of "after the wake word it cannot hear us instantly".
+        if "[unk]" not in spotted:
+            self.armed_until = time.monotonic() + self.window
+            print("ears: woken (%.1fs) - listening for a command" % secs,
+                  flush=True)
+            return
+
+        # Something followed it in the same breath, which is how people
+        # actually talk. Now the full decode is worth paying for.
         text = self.free.transcribe(samples)
         rest = stt.strip_wake(text)
         # If strip_wake removed something, what is left IS the command - do not
@@ -366,5 +488,9 @@ class Ears(object):
                 "wakes": self.wakes, "commands": self.commands,
                 "opens": self.opens, "last_heard": self.last_heard,
                 "device": self.device_in_use,
+                "backlog": (round(self._drain.backlog(), 1)
+                            if self._drain is not None else None),
+                "dropped": (self._drain.dropped
+                            if self._drain is not None else 0),
                 "misses": list(self.misses[-6:]),
                 "armed": time.monotonic() < self.armed_until}

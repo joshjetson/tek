@@ -107,6 +107,8 @@ def make_ears(wake_script, free_script):
     e.utterances = e.wakes = e.commands = e.opens = 0
     e.last_heard = None
     e.misses = []
+    e._gate = None
+    e._drain = None
     e._run = True
     e._t = None
     e.wake = FakeRec(wake_script)
@@ -136,7 +138,9 @@ for i in range(30):
 check("misses are bounded, not a leak", len(e.misses) <= 12, len(e.misses))
 
 # Wake word and command in one breath - how people actually talk.
-e = make_ears(["hey tek"], ["hey tek what time is it"])
+# "hey tek [unk]" is what the grammar really returns when a command follows -
+# the bare form means nothing came after it.
+e = make_ears(["hey tek [unk]"], ["hey tek what time is it"])
 e._utterance(DUMMY)
 check("wake + command in one breath is dispatched immediately",
       len(e.service.events) == 1, e.service.events)
@@ -149,7 +153,7 @@ check("the transcript reaches the brain's prompt text",
       "what time is it" in e.service.events[0].get("what", ""))
 
 # Wake word alone -> arm, then take the next utterance as the command.
-e = make_ears(["hey tek"], ["hey tek", "turn the lights off"])
+e = make_ears(["hey tek"], ["turn the lights off"])
 e._utterance(DUMMY)
 check("wake word alone dispatches nothing yet", e.service.events == [])
 check("wake word alone arms it", time.monotonic() < e.armed_until)
@@ -162,23 +166,101 @@ check("it disarms after taking one command", e.armed_until == 0.0)
 check("while armed it does not re-check the wake word",
       e.wake.calls == 1, e.wake.calls)
 
+# Saying "hey tek" twice - normal when the first seemed unheard - must not
+# become a question about the words "hey tek".
+e = make_ears(["hey tek"], ["hey tek"])
+e._utterance(DUMMY)
+e._utterance(DUMMY)
+check("a repeated wake word is not dispatched as the question",
+      e.service.events == [], e.service.events)
+
 # An armed window that catches nothing usable must not fire a blank command.
-e = make_ears(["hey tek"], ["hey tek", ""])
+e = make_ears(["hey tek"], [""])
 e._utterance(DUMMY)
 e._utterance(DUMMY)
 check("an empty follow-up does not dispatch an empty command",
       e.service.events == [], e.service.events)
-check("and it disarms rather than staying armed forever",
-      e.armed_until == 0.0)
+# ...and the window must SURVIVE it. After a reply the first thing segmented is
+# often the room settling, which decodes to nothing; spending the arm on that
+# left the real follow-up arriving to a closed door.
+check("a blank scrap does not consume the listening window",
+      time.monotonic() < e.armed_until, e.armed_until - time.monotonic())
+e.free.script = ["and what about winter"]
+e._utterance(DUMMY)
+check("the real follow-up still lands after a blank one",
+      [ev.get("heard") for ev in e.service.events] == ["and what about winter"],
+      e.service.events)
+check("and THAT disarms it", e.armed_until == 0.0)
 
 # Counters, so `tek ears` reports something truthful.
-e = make_ears(["[unk]", "hey tek"], ["hey tek hello there"])
+e = make_ears(["[unk]", "hey tek [unk]"], ["hey tek hello there"])
 e._utterance(DUMMY)
 e._utterance(DUMMY)
 check("counts every utterance, not just the ones that woke it",
       e.utterances == 2, e.utterances)
 check("counts wakes and commands separately",
       (e.wakes, e.commands) == (1, 1), (e.wakes, e.commands))
+
+# -- the wake word ALONE must not pay for a free decode --------------------
+# Recognition is slower than real time on this board (a 0.7s "hey tek" takes
+# 1.47s to free-decode) and parec's pipe holds 2.05s, so paying for a decode
+# the instant somebody says the wake word is exactly when it can least afford
+# to be deaf. The grammar already distinguishes the two cases: it returns
+# "hey tek" alone, and "hey tek [unk]" when more followed.
+e = make_ears(["hey tek"], ["SHOULD NOT BE CALLED"])
+e._utterance(DUMMY)
+check("a bare wake word arms without a free decode at all",
+      e.free.calls == 0 and time.monotonic() < e.armed_until, e.free.calls)
+e = make_ears(["hey tek [unk]"], ["hey tek what time is it"])
+e._utterance(DUMMY)
+check("a wake word WITH speech after it does decode",
+      e.free.calls == 1 and e.service.events, (e.free.calls, e.service.events))
+
+
+# -- the reader must never be blocked by the recogniser --------------------
+# The whole failure was that transcription ran inline, so nothing read the
+# microphone while it worked and the 2.05s pipe overflowed.
+slow = vio.ArraySource(np.tile(loud, 300), pcm.RATE)
+d = ears.Draining(slow, seconds=1.0)
+time.sleep(0.3)
+before = len(d.q)
+time.sleep(0.5)                       # a "transcription" during which we read nothing
+check("audio keeps being read while nothing consumes it",
+      len(d.q) >= before and d.deepest > 0, (before, len(d.q), d.deepest))
+check("the backlog is bounded, not unbounded",
+      len(d.q) <= d.max, (len(d.q), d.max))
+check("and it says how much it threw away", d.dropped > 0, d.dropped)
+got = d.read()
+check("what comes out is real audio", got is not None and pcm.envelope(got) > 0.4,
+      None if got is None else pcm.envelope(got))
+d.close()
+
+empty = ears.Draining(vio.ArraySource(pcm.silence(0), pcm.RATE))
+time.sleep(0.2)
+check("a source that ends ends the drain too", empty.read() is None)
+empty.close()
+
+
+# -- a follow-up must not need the wake word again -------------------------
+class _Gate(object):
+    def __init__(self, spoke_at):
+        self.spoke_at = spoke_at
+
+
+e = make_ears(["[unk]"], ["yes please tell me more"])
+e._gate = _Gate(time.monotonic())          # it just finished speaking
+e._utterance(DUMMY)
+check("straight after a reply, a follow-up needs no wake word",
+      [ev.get("heard") for ev in e.service.events] == ["yes please tell me more"],
+      e.service.events)
+
+e = make_ears(["[unk]"], ["someone talking about something else"])
+e._gate = _Gate(time.monotonic() - (ears.FOLLOWUP_S + 5))
+e._utterance(DUMMY)
+check("but ordinary chatter long afterwards is still ignored",
+      e.service.events == [], e.service.events)
+check("the follow-up window is short", ears.FOLLOWUP_S <= 20.0, ears.FOLLOWUP_S)
+
 
 # -- the free decoder mishearing the wake word -----------------------------
 # Observed in the room: the grammar matched "hey tech" perfectly (it can only
@@ -231,13 +313,13 @@ for phrase in ("what time is it", "hate technology in general",
 # greeting - "we tank" scores 0.57 and "hey there" 0.75 - so it is only ever
 # consulted when strip_wake removed nothing. Pin the routing, since that is
 # what makes the ambiguity harmless.
-e = make_ears(["hey tek"], ["hey tek hello there"])
+e = make_ears(["hey tek [unk]"], ["hey tek hello there"])
 e._utterance(DUMMY)
 check("a stripped remainder is dispatched even if it looks wake-ish",
       [ev.get("heard") for ev in e.service.events] == ["hello there"],
       e.service.events)
 
-e = make_ears(["hey tech"], ["hate tech"])
+e = make_ears(["hey tech [unk]"], ["hate tech"])
 e._utterance(DUMMY)
 check("a mangled BARE wake word arms instead of being asked as a question",
       e.service.events == [] and time.monotonic() < e.armed_until,

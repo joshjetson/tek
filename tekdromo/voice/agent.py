@@ -46,6 +46,13 @@ SILENCE = "SILENCE"
 REMARK_LIMIT = 400
 ANSWER_LIMIT = 700
 
+# How many exchanges of context the model gets, and how long an exchange stays
+# relevant. Enough to resolve "why?" and "what about the other one?", short
+# enough that a conversation from this morning is not presented as though it
+# were still going on.
+TURNS_KEPT = 6
+TURN_MAX_AGE = 600.0
+
 # Opus, and NOT for the reason you would expect. This was "haiku", on the
 # stated grounds that speed matters more than depth for deciding whether to say
 # hello. Nobody had measured it. Same prompts, same box, three questions each:
@@ -224,6 +231,27 @@ class ClaudeBrain(Brain):
         if event.get("recent"):
             hist += " Recently you said: " + "; ".join(
                 '"%s"' % r for r in event["recent"][-3:])
+        # The actual conversation, both halves of it. Without this every
+        # question arrived standalone - the model was told what IT had said but
+        # never what it had been ASKED - so any follow-up ("why?", "what about
+        # the other one?") had nothing to attach to and it guessed. That reads
+        # as a weaker model rather than as missing context, which is exactly
+        # how it was reported.
+        turns = event.get("turns") or []
+        if turns:
+            lines = []
+            for t in turns[-TURNS_KEPT:]:
+                if t.get("heard"):
+                    lines.append("  Them: %s" % t["heard"])
+                if t.get("said"):
+                    lines.append("  You:  %s" % t["said"])
+            if lines:
+                hist += ("\n\nTHE CONVERSATION SO FAR, most recent last:\n"
+                         + "\n".join(lines)
+                         + "\n\nWhat they just said continues this. Resolve "
+                           "'it', 'that', 'why' and 'the other one' against "
+                           "it, and do not repeat an answer you have already "
+                           "given.")
         kind = event.get("kind", "default")
         # Only ask it to open the camera frame when there IS one. The image
         # instruction used to be unconditional, so an event with no picture
