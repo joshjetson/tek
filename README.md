@@ -1519,5 +1519,18 @@ transcribe → model → speak) and the microphone are both live — see
 
 ---
 
+## Licence
+
+[Apache License 2.0](LICENSE). Use it, fork it, ship it commercially — it
+includes an explicit patent grant, which matters for a project people will bolt
+onto hardware.
+
+It also carries a warranty disclaimer and a limitation of liability, which is the
+formal half of what [§11](#11-privacy-consent-and-what-this-is-not) says in
+plain English: **this is provided as-is, and how you deploy a camera and a
+microphone is your responsibility, not the authors'.**
+
+---
+
 <sub>Deeper engineering notes, including the reasoning behind the face geometry
 and the full optimisation history, are in [TEKDROMO.md](TEKDROMO.md).</sub>
