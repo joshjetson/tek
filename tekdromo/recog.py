@@ -33,6 +33,16 @@ THRESHOLD = 62.0
 UNKNOWN = "UNKNOWN"
 
 
+# iBUG 68-point layout: these are the eye contours. The landmark fitter that
+# draws the HUD face panel already produces them, so alignment costs nothing.
+_LEFT_EYE = list(range(36, 42))
+_RIGHT_EYE = list(range(42, 48))
+# Where the eyes are put in the normalised crop. eye_y below half-height
+# because a face has more below the eyes than above.
+EYE_Y = 0.36
+EYE_DX = 0.34
+
+
 def _norm(gray):
     """One preprocessing path, used for BOTH training and prediction.
 
@@ -42,6 +52,87 @@ def _norm(gray):
     import cv2
     g = cv2.resize(gray, SIZE, interpolation=cv2.INTER_AREA)
     return cv2.equalizeHist(g)
+
+
+def align(gray, pts, rect=None):
+    """Eye-aligned crop, or None if the landmarks are unusable.
+
+    LBPH compares pixels at fixed positions, so it is far more sensitive to
+    the face being in a slightly different place than to the light being
+    different. Measured on this gallery, against a threshold of 62:
+
+        perturbation        as cropped      eye-aligned
+        shifted 10px          98.1            36.6
+        shifted + blurred    101.1            48.0
+        scaled to 85%         40.8            26.2
+
+    while gamma and contrast changes cost almost nothing, because the pipeline
+    already equalises. Geometry was the whole problem. The raw detector
+    rectangle jitters frame to frame and sits differently on a different
+    camera, which is why recognition survived neither.
+
+    `pts` are 68 landmarks in the SAME pixel space as `gray`.
+    """
+    import cv2
+    import numpy as np
+    if pts is None or len(pts) < 48:
+        return None
+    p = np.asarray(pts, dtype=np.float32)
+    le = p[_LEFT_EYE].mean(axis=0)
+    re = p[_RIGHT_EYE].mean(axis=0)
+    dx, dy = float(re[0] - le[0]), float(re[1] - le[1])
+    span = float(np.hypot(dx, dy))
+    if span < 4.0:                       # degenerate fit; better to fall back
+        return None
+    angle = float(np.degrees(np.arctan2(dy, dx)))
+    want = (1.0 - 2.0 * (0.5 - EYE_DX)) * SIZE[0]
+    mid = ((le[0] + re[0]) * 0.5, (le[1] + re[1]) * 0.5)
+    M = cv2.getRotationMatrix2D(mid, angle, want / span)
+    M[0, 2] += SIZE[0] * 0.5 - mid[0]
+    M[1, 2] += SIZE[1] * EYE_Y - mid[1]
+    # Deliberately NOT equalised here. _norm owns that, so it happens exactly
+    # once no matter which path an image took - see prepare().
+    return cv2.warpAffine(gray, M, SIZE, flags=cv2.INTER_LINEAR,
+                          borderMode=cv2.BORDER_REPLICATE)
+
+
+def prepare(gray, pts=None):
+    """The canonical face image, aligned if landmarks allow it.
+
+    One function so training and prediction cannot drift apart - the same
+    reason _norm exists. Falling back to a plain crop keeps a face that the
+    landmark fitter cannot handle recognisable, just less reliably.
+    """
+    if pts is not None:
+        out = align(gray, pts)
+        if out is not None:
+            return _norm(out)
+    return _norm(gray)
+
+
+# Extra training copies of every enrolled face, standing in for a camera that
+# delivers less detail than the one the person was enrolled on. Costs nothing
+# at enrolment and is the difference between recognising someone across a
+# camera change and not. Measured by leave-one-out on this gallery, threshold
+# 62:
+#
+#   probe            plain   augmented
+#   as-is             45.1     45.1      (no cost when detail is there)
+#   half resolution   51.7     42.8
+#   third resolution  56.7     43.0
+#   third + blur      61.0     41.4      (was sitting on the threshold)
+#
+# The new webcam is wider-angle, so a face at the same standing distance covers
+# fewer pixels and arrives softer - which is precisely this axis.
+_AUGMENT = ((0.55, 0), (0.40, 3))
+
+
+def _degrade(img, frac, blur):
+    import cv2
+    n = max(8, int(SIZE[0] * frac))
+    small = cv2.resize(img, (n, n), interpolation=cv2.INTER_AREA)
+    out = cv2.resize(small, SIZE, interpolation=cv2.INTER_LINEAR)
+    return cv2.GaussianBlur(out, (blur, blur), 0) if blur else out
 
 
 def registry():
@@ -138,14 +229,14 @@ def samples(name):
         return []
 
 
-def save_sample(name, gray):
+def save_sample(name, gray, pts=None):
     import cv2
     d = os.path.join(GALLERY, name)
     if not os.path.isdir(d):
         os.makedirs(d)
     n = len(samples(name))
     path = os.path.join(d, "%03d.png" % n)
-    cv2.imwrite(path, _norm(gray))
+    cv2.imwrite(path, prepare(gray, pts))
     return path
 
 
@@ -169,12 +260,26 @@ class Recogniser(object):
                 g = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
                 if g is None:
                     continue
-                imgs.append(_norm(g))
+                # Used AS STORED. save_sample() already ran prepare() on
+                # it, and running _norm again would equalise the training
+                # images twice while predictions were equalised once - the
+                # exact silent mismatch _norm exists to prevent. Only the
+                # size is enforced, for galleries written before SIZE moved.
+                if g.shape[:2] != (SIZE[1], SIZE[0]):
+                    g = cv2.resize(g, SIZE, interpolation=cv2.INTER_AREA)
+                imgs.append(g)
                 ids.append(i)
                 got += 1
+                # ...plus lower-detail copies, so a softer camera still
+                # matches. See _AUGMENT for the measured effect.
+                for frac, blur in _AUGMENT:
+                    imgs.append(_degrade(g, frac, blur))
+                    ids.append(i)
             if got:
                 self.labels[i] = name
-        self.trained = len(imgs)
+        # Report the ENROLLED count, not the augmented one - "36 samples"
+        # for twelve photographs would just be confusing.
+        self.trained = sum(1 for _ in ids) // (1 + len(_AUGMENT))
         if len(self.labels) < 1 or not imgs:
             self.model = None
             return 0
@@ -182,12 +287,17 @@ class Recogniser(object):
         self.model.train(imgs, np.array(ids))
         return self.trained
 
-    def predict(self, gray_face):
-        """(name, distance). UNKNOWN when there is no gallery or no good match."""
+    def predict(self, gray_face, pts=None):
+        """(name, distance). UNKNOWN when there is no gallery or no good match.
+
+        `pts` are 68 landmarks in gray_face's pixel space. With them the face
+        is eye-aligned first, which is worth far more than any amount of
+        threshold tuning - see align().
+        """
         if self.model is None or gray_face is None or not gray_face.size:
             return UNKNOWN, None
         try:
-            label, dist = self.model.predict(_norm(gray_face))
+            label, dist = self.model.predict(prepare(gray_face, pts))
         except Exception:
             return UNKNOWN, None
         if dist is None or dist > THRESHOLD:

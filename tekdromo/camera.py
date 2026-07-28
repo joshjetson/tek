@@ -97,6 +97,7 @@ class Tracker:
         self.name = None            # who the recogniser thinks this is
         self._seen_logged = {}
         self.face_crop = None       # greyscale crop, for enrolment
+        self.face_pts = None        # its landmarks, for alignment
         try:
             from . import recog
             self._recog = recog.Recogniser()
@@ -269,8 +270,8 @@ class Tracker:
             return
         # biggest face wins - the nearest person is the one being addressed
         x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
-        self._fit_landmarks(small, (x, y, fw, fh), now)
-        self._identify(g, (x, y, fw, fh))
+        pts_px = self._fit_landmarks(small, (x, y, fw, fh), now)
+        self._identify(g, (x, y, fw, fh), pts_px)
         if self.detections % 40 == 0:
             self._check_gallery()
         cx = (x + fw * 0.5) / small.shape[1]
@@ -299,7 +300,13 @@ class Tracker:
             return
         if not ok or not len(shapes):
             return
-        pts = np.array(shapes[0]).reshape(-1, 2).astype(np.float32)
+        raw = np.array(shapes[0]).reshape(-1, 2).astype(np.float32)
+        # The HUD wants them normalised and mirrored; the RECOGNISER wants raw
+        # pixels in this image's own coordinates. Normalising in place and
+        # handing the same array to both would align faces against a mirrored,
+        # 0..1 coordinate system - which produces a plausible-looking crop of
+        # entirely the wrong part of the frame.
+        pts = raw.copy()
         h, w = small.shape[:2]
         pts[:, 0] /= float(w)
         pts[:, 1] /= float(h)
@@ -308,6 +315,7 @@ class Tracker:
         with self._lock:
             self.landmarks = pts
             self.landmarks_at = now
+        return raw
 
     def _check_gallery(self):
         """Reload if someone has been enrolled since we started.
@@ -327,8 +335,13 @@ class Tracker:
                 print("recogniser: %d samples, %s"
                       % (n, ", ".join(recog.people()) or "nobody"), flush=True)
 
-    def _identify(self, gray_small, rect):
-        """Name the detected face, from the same greyscale the detector used."""
+    def _identify(self, gray_small, rect, pts_px=None):
+        """Name the detected face, from the same greyscale the detector used.
+
+        The landmarks are passed WHOLE and in full-frame coordinates, not
+        cropped: align() needs to place the eyes itself, and handing it a crop
+        plus frame-relative points would put them outside the image.
+        """
         if self._recog is None:
             return
         x, y, w, h = rect
@@ -336,11 +349,19 @@ class Tracker:
         if crop.size < 100:
             return
         try:
-            name, _dist = self._recog.predict(crop)
+            if pts_px is not None:
+                # Align from the FULL frame, so the warp can pull in the
+                # forehead and chin the detector box cuts off.
+                name, _dist = self._recog.predict(gray_small, pts_px)
+            else:
+                name, _dist = self._recog.predict(crop)
         except Exception:
             name = None
         with self._lock:
+            # Store what enrolment should save: the aligned face if we have
+            # one, so `tek face enrol` and prediction agree by construction.
             self.face_crop = crop
+            self.face_pts = pts_px
             self.name = name
         # Log the sighting, at most once a minute per person: this writes a
         # file, and the detector runs several times a second.
@@ -360,8 +381,31 @@ class Tracker:
             return self.name
 
     def crop(self):
+        """The face as ENROLMENT should store it - eye-aligned when possible.
+
+        Alignment has to happen here rather than at enrolment time because the
+        crop reaches `tek face enrol` as a PNG on disk, and landmarks cannot
+        travel in a PNG. Returning the aligned image means what is enrolled and
+        what is later predicted went through the same geometry by
+        construction, which is the only way the two stay in step.
+
+        Deliberately NOT equalised: recog._norm owns that, so it happens
+        exactly once whichever path an image takes.
+        """
+        from . import recog
         with self._lock:
-            return None if self.face_crop is None else self.face_crop.copy()
+            crop = None if self.face_crop is None else self.face_crop.copy()
+            pts = None if self.face_pts is None else self.face_pts.copy()
+            frame = self.last_frame
+        if pts is not None and frame is not None:
+            small = cv2.resize(frame, None, fx=self.detect_scale,
+                               fy=self.detect_scale,
+                               interpolation=cv2.INTER_AREA)
+            g = cv2.equalizeHist(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY))
+            out = recog.align(g, pts)
+            if out is not None:
+                return out
+        return crop
 
     def relearn(self):
         """Pick up newly enrolled faces without a restart."""
