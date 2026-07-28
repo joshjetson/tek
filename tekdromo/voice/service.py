@@ -742,7 +742,12 @@ class VoiceService(object):
 
             self._interrupt.clear()
             self.speaking = True
-            self.server.publish({"speaking": True, "text": said["text"]})
+            # The mood rides with `speaking` rather than on its own message.
+            # The display must never receive an expression for an utterance it
+            # does not know has started, and one message cannot arrive in the
+            # wrong order relative to itself.
+            self.server.publish({"speaking": True, "text": said["text"],
+                                 "mood": getattr(self.brain, "last_mood", None)})
             sink = vio.SpeakerSink(device=self.device, rate=rate)
 
             # Barge-in. The reference sits in a Tee beside the speaker, so what

@@ -815,6 +815,45 @@ that clamps `eye_open`, so it works during any expression and during speech.
   <img src="docs/images/display-blink.png" width="70%" alt="TEK caught mid-blink while speaking: eyes closed, mouth open, scope active">
 </p>
 
+### The face wears what it is saying
+
+The rig has had `amused`, `concerned`, `confused`, `happy` and `surprised`
+since it was written — and until now **nothing ever set them**. The face said
+something wry with a completely neutral expression. The controls, the presets
+and the blend were all already here; the only missing piece was anything
+deciding which one to wear.
+
+The brain now prefixes one tag, which is stripped before a word is spoken:
+
+```
+[amused] Of course it was the cat.
+[concerned] The garage has been open since four.
+```
+
+<p align="center">
+  <img src="docs/images/moods.png" width="100%" alt="The seven expressions TEK can wear, rendered from the live rig">
+</p>
+
+If the tag is missing — an older model, or a stream that lost its head — a
+keyword fallback guesses from the words instead. That fallback had a bug worth
+recording: plain substring matching made `"ha"` fire inside `"what"` and
+`"half"`, so *"I am not sure what you meant"* came out **amused**, and so did
+*"it is half past four"*. It matches on word boundaries now, and a test holds
+it there.
+
+Three details that matter more than they look:
+
+* **Edge-triggered, never per-frame.** `express()` restarts its blend from the
+  current pose, so calling it every frame freezes the ramp at its first step
+  and the change never arrives.
+* **A mood outranks presence.** Otherwise walking into frame mid-sentence wipes
+  the face back to `attentive`.
+* **The ramp is slow** — 0.9 s in, 1.4 s out. A face that snaps between
+  expressions reads as a slideshow of faces rather than one face changing its
+  mind, and a 0.27 ms warm rig can afford to move gradually.
+
+Measured: **28.4 fps**, unchanged.
+
 <p align="center"><sub>Caught mid-blink <i>while speaking</i> — eyes shut, mouth
 open, scope live. The blink reflex clamps <code>eye_open</code> underneath
 whatever else is driving the face, so it never has to be scheduled around
@@ -911,6 +950,7 @@ for t in tests/*.py; do python3 "$t"; done
 | `panic_unit.py` | the escape hatch, incl. a **real uinput keyboard** | root for the last part |
 | `voice_ears.py` | the self-hearing gate, wake/command logic, misheard wake words | none |
 | `voice_lipsync.py` | reads `/dev/fb0` while really speaking | display + voice |
+| `mood_unit.py` | tag parsing on all three reply paths, the keyword fallback, that every offerable mood exists in the rig and actually moves the face | none |
 | `memory_unit.py` | stopwords, query building, decay, budget, migration checksums, and that a dead journal degrades rather than raises | none (the Postgres half self-skips) |
 
 Three are disruptive and therefore live in `tools/`, not `tests/`:

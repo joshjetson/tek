@@ -20,6 +20,7 @@ an unrecognised person is simply not greeted by name.
 """
 import json
 import os
+import re
 import subprocess
 import time
 
@@ -29,6 +30,47 @@ PEOPLE = os.path.join(CONFIG_DIR, "people.md")
 BRAIN_CWD = os.path.expanduser("~/.cache/tekdromo/brain")
 
 SILENCE = "SILENCE"
+
+# The expressions the brain may ask for. A strict subset of rig.EXPRESSIONS:
+# "asleep", "listening" and "speaking" are states the display owns and must not
+# be settable by something that is only deciding what to SAY. An unknown tag
+# falls back to guess_mood() rather than raising - a model inventing "[wry]"
+# should cost nothing.
+MOODS = ("neutral", "amused", "happy", "concerned", "confused",
+         "surprised", "thinking")
+
+# Accepts [amused] and (amused), any case, with or without surrounding space.
+# Anchored at the start only: a bracketed word mid-sentence is text, not a tag.
+_MOOD_RE = re.compile(r"^\s*[\[(]\s*(%s)\s*[\])]\s*" % "|".join(MOODS),
+                      re.IGNORECASE)
+
+# Keyword fallback for when the tag is missing - an older model, a refusal to
+# follow the format, or a reply reconstructed from a stream that lost its head.
+# Crude on purpose: the cost of a wrong guess is a slightly odd face for a few
+# seconds, and the cost of a missing one is the flat stare this exists to fix.
+_MOOD_HINTS = (
+    ("concerned", ("sorry", "afraid", "unfortunately", "problem", "wrong",
+                   "failed", "broken", "careful", "warning", "cannot",
+                   "trouble", "worry")),
+    ("amused",    ("funny", "ha", "amusing", "cheeky", "of course you",
+                   "naturally", "typical")),
+    ("happy",     ("great", "lovely", "excellent", "wonderful", "glad",
+                   "welcome back", "good to see", "nice to")),
+    ("confused",  ("not sure", "unclear", "did you mean", "i think you",
+                   "hard to tell", "cannot tell", "say again", "repeat that")),
+    ("surprised", ("already", "that was fast", "wow", "really?", "no idea")),
+)
+
+# Compiled with WORD BOUNDARIES, which is not a refinement - it is the
+# difference between working and not. Plain substring matching made "ha" fire
+# inside "what" and "half", so "I am not sure what you meant" came out amused
+# and so did "it is half past four". A trailing boundary is only added when the
+# hint ends in a word character, so "really?" still matches.
+_MOOD_PATTERNS = tuple(
+    (mood, tuple(re.compile(r"\b" + re.escape(h) +
+                            (r"\b" if h[-1].isalnum() else ""))
+                 for h in hints))
+    for mood, hints in _MOOD_HINTS)
 
 # How long a reply may be, by kind. A camera greeting really should be one or
 # two sentences - a face that monologues at you when you walk in is worse than
@@ -87,8 +129,17 @@ describing the photo back. Write the way a person talks, not the way a person
 writes. Use a name only if the description above makes you reasonably
 confident.
 
+Begin your reply with ONE mood tag in square brackets, which sets your face
+while you speak. It is stripped before anything is read aloud, so it costs the
+listener nothing. Choose from: %(moods)s. Use neutral unless
+another genuinely fits - a face that is amused at everything is as wrong as one
+that is never anything.
+
+    [amused] Of course it was the cat.
+    [concerned] The garage has been open since four.
+
 Reply with EXACTLY the single word %(silence)s to say nothing.
-Otherwise reply with ONLY the words to speak."""
+Otherwise reply with the tag, then ONLY the words to speak."""
 
 # The lean is per-event, because the right default genuinely differs. An
 # earlier single instruction told the model that "merely detecting a person"
@@ -193,6 +244,9 @@ class Brain(object):
     """event dict -> words to speak, or None for silence."""
 
     name = "?"
+    # The expression to wear while saying it, set alongside the words. On the
+    # base class so every Brain has one and no caller needs a getattr guard.
+    last_mood = None
 
     def respond(self, event):
         raise NotImplementedError
@@ -301,6 +355,7 @@ class ClaudeBrain(Brain):
             "people": people_notes(),
             "look": look,
             "silence": SILENCE,
+            "moods": ", ".join(MOODS),
         }
 
     def respond(self, event):
@@ -354,7 +409,13 @@ class ClaudeBrain(Brain):
             return None
         self.last_error = None
         text = (out or b"").decode("utf-8", "replace").strip()
-        return parse(text, limit_for(event.get("kind")))
+        mood, text = split_mood(text)
+        words = parse(text, limit_for(event.get("kind")))
+        # Only claim a mood if something is actually going to be said. Setting
+        # the face from a reply that turned out to be SILENCE would leave it
+        # wearing an expression for a sentence nobody heard.
+        self.last_mood = (mood or guess_mood(words)) if words else None
+        return words
 
     def stream(self, event):
         """Yield the reply in pieces, as the model writes it.
@@ -407,16 +468,30 @@ class ClaudeBrain(Brain):
                 if not piece:
                     continue
                 if not opened:
-                    # Hold back only until a decline can be ruled out. Every
-                    # character withheld here is latency, so the test is
-                    # exactly "could this still turn into SILENCE?" and
-                    # nothing more.
+                    # Hold back only until a decline can be ruled out, and
+                    # until the mood tag is complete. Every character withheld
+                    # here is latency, so the tests are exactly "could this
+                    # still turn into SILENCE?" and "is the tag still
+                    # arriving?" - nothing more.
                     head += piece
                     bare = head.strip().strip('"').upper()
                     if bare and SILENCE.startswith(bare):
                         continue                    # still might be SILENCE
                     if bare.startswith(SILENCE):
                         return                      # it is
+                    lead = head.lstrip()
+                    if lead[:1] in ("[", "("):
+                        # A tag is opening. Wait for its bracket rather than
+                        # speaking "[amused" out loud. Bounded, so a reply that
+                        # legitimately starts with a bracket and never closes
+                        # one cannot stall the whole answer.
+                        if not (")" in lead or "]" in lead):
+                            if len(lead) < 24:
+                                continue
+                        else:
+                            mood, head = split_mood(head)
+                            if mood:
+                                self.last_mood = mood
                     opened = True
                     piece, head = head, ""
                 if sent >= limit:
@@ -431,9 +506,38 @@ class ClaudeBrain(Brain):
                 except Exception:
                     pass
         if not opened and head.strip():
-            out = parse(head, limit)
+            mood, rest = split_mood(head)
+            out = parse(rest, limit)
             if out:
+                if mood:
+                    self.last_mood = mood
                 yield out
+
+
+def split_mood(text):
+    """(mood, text) - the leading [tag] removed. mood is None if absent.
+
+    Stripping is not optional: everything returned here is read ALOUD, so a tag
+    that survives is the face saying the word "amused" before its sentence.
+    """
+    if not text:
+        return None, text
+    m = _MOOD_RE.match(text)
+    if not m:
+        return None, text
+    return m.group(1).lower(), text[m.end():]
+
+
+def guess_mood(text):
+    """A mood from the words alone, for when the tag is missing."""
+    if not text:
+        return "neutral"
+    low = text.lower()
+    for mood, patterns in _MOOD_PATTERNS:
+        for p in patterns:
+            if p.search(low):
+                return mood
+    return "neutral"
 
 
 def parse(text, limit=REMARK_LIMIT):

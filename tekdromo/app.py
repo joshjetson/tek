@@ -33,6 +33,14 @@ from .voice import bus
 # How long a presence change must persist before it counts as an event. Below
 # this, a detector glitch becomes an arrival.
 WATCH_STABLE = 2.0
+
+# How long an expression takes to arrive, and to let go. Both far slower than
+# the 0.45s used for presence: presence is a fact that has just changed, a mood
+# is something a face settles into. Letting go is slower still, because
+# snapping back to neutral the instant the last word lands reads as the face
+# switching off rather than as a conversation ending.
+MOOD_BLEND = 0.9
+MOOD_RELAX = 1.4
 SNAPSHOT = os.path.join(os.path.expanduser("~/.cache/tekdromo"), "seen.jpg")
 # Refresh the on-disk frame this often while someone is in view.
 SNAPSHOT_EVERY = 8.0
@@ -200,13 +208,51 @@ class Display:
         st = self.cam.state()
         gx, gy, hy = self.follow.update(st, dt)
         self.face.set(gaze_x=gx, gaze_y=gy)
+        # Presence drives the expression only when speech is not. A mood set
+        # for a reply has to outrank "somebody is in the room", or walking into
+        # frame mid-sentence would wipe the face back to attentive.
         if st["present"] != getattr(self, "_seen", False):
-            self.face.express("attentive" if st["present"] else "neutral",
-                              blend=0.45)
             self._seen = st["present"]
+            if getattr(self, "_mood", None) is None:
+                self.face.express("attentive" if st["present"] else "neutral",
+                                  blend=0.45)
         w = 1.0 if st["present"] else 0.0         # presence weight
         self._watch(st, t)
         return rx - 0.10 * gy * w, idle * (1.0 - 0.75 * w) + hy * w
+
+    MOOD_BLEND = MOOD_BLEND
+    MOOD_RELAX = MOOD_RELAX
+
+    def _apply_mood(self):
+        """Wear the expression the reply asked for, while it is being said.
+
+        The rig has had `amused`, `concerned`, `confused`, `happy` and
+        `surprised` since it was written, and nothing ever set them - the face
+        said something wry with a completely neutral expression. The controls,
+        the presets and the blend were all already here; the only missing piece
+        was anything deciding which one to wear.
+
+        Edge-triggered, not per-frame: `express()` restarts its blend from the
+        current pose each time it is called, so calling it every frame would
+        freeze the ramp at its first step and the change would never arrive.
+
+        The ramp is SLOW on purpose. A face that snaps between expressions
+        reads as a slideshow of faces rather than as one face changing its
+        mind, and the whole point of a 0.27ms warm rig is that it can afford to
+        move gradually.
+        """
+        mood = self.mouth.mood if self.mouth.speaking else None
+        if mood == getattr(self, "_mood", None):
+            return
+        self._mood = mood
+        if mood:
+            self.face.express(mood, blend=self.MOOD_BLEND)
+        else:
+            # Speech ended. Hand the face back to the presence state machine,
+            # which _watch's edge trigger will not do on its own because
+            # presence has not changed.
+            self.face.express("attentive" if getattr(self, "_seen", False)
+                              else "neutral", blend=self.MOOD_RELAX)
 
     # -- camera events -----------------------------------------------------
     def _watch(self, st, t):
@@ -533,6 +579,7 @@ class Display:
                         self.face.speak(*speech.synthetic(t))
                     else:
                         self.face.speak(0.0, 0.0)
+                    self._apply_mood()
                 rx, ry = self.pose(t, dt)
                 v, e, n = self.face.update(t, dt)
                 pts = geometry.build_pts_culled(v, e, n, self.w, self.h,

@@ -38,6 +38,10 @@ class MouthLink(object):
         self.running = True
         self.connected = False
         self.speaking = False
+        # The expression to wear while this utterance is being said. Cleared
+        # when speech ends so the face returns to whatever the display's own
+        # state machine wants, rather than holding the last mood forever.
+        self.mood = None
         self._mouth = (0.0, 0.0)
         self._at = 0.0
 
@@ -63,13 +67,17 @@ class MouthLink(object):
                         self._at = time.time()
                     if "speaking" in msg:
                         self.speaking = bool(msg["speaking"])
-                        if not self.speaking:
+                        if self.speaking:
+                            self.mood = msg.get("mood")
+                        else:
                             self._mouth = (0.0, 0.0)
+                            self.mood = None
             except Exception:
                 pass                       # service down: retry, never raise
             finally:
                 self.connected = False
                 self.speaking = False
+                self.mood = None
                 self._mouth = (0.0, 0.0)
                 if client is not None:
                     try:
