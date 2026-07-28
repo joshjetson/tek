@@ -1270,6 +1270,15 @@ Three things that were wrong first, all caught by measurement:
 >
 > `tek interrupt` is unaffected and is verified on hardware — a ~22 s reply
 > stopped at 6.8 s.
+>
+> **`tek ears` now reports this.** The fault took a hand-built experiment to
+> find, because every software layer says healthy: paired, A2DP up at 52 ms,
+> PulseAudio accepting audio, the sink monitor showing signal at 0.054 peak.
+> Only the acoustic path is broken, and nothing was watching it. The Gate
+> measures ambient and speaking-time level continuously and `tek ears` prints
+> the ratio — `*** NOT AUDIBLE TO THE MIC (0.84x ambient)` — because a
+> capability that silently disables barge-in and every tool in `tools/` should
+> not be discoverable only by wondering why nothing works.
 
 That measurement error is also why `MIN_LEVEL` is no longer a constant. It was
 `0.012`, taken from the synthetic bench where echo sits at 0.05–0.15 rms, and it

@@ -113,6 +113,7 @@ class Gate(vio.Source):
         self.barges = 0
         self.open_until = 0.0
         self.ambient = None           # rms of the room with nothing playing
+        self.while_speaking = None    # rms of the room while the speaker plays
         self._seen = None             # the detector we last calibrated
         self.last_at = time.monotonic()
 
@@ -132,6 +133,10 @@ class Gate(vio.Source):
         if getattr(self.service, "speaking", False):
             self.until = now + self.tail
             self.spoke_at = now
+            # The other half of the acoustic health check - see heard_ratio().
+            r = float(np.sqrt(np.mean(pcm.to_float(np.asarray(frame)) ** 2)))
+            self.while_speaking = r if self.while_speaking is None else (
+                0.98 * self.while_speaking + 0.02 * r)
             det = getattr(self.service, "barge", None)
             if det is not None:
                 # Tell it what this room sounds like. The Gate is the only
@@ -169,6 +174,24 @@ class Gate(vio.Source):
         self.ambient = r if self.ambient is None else (
             0.995 * self.ambient + 0.005 * r)
         return frame
+
+    def heard_ratio(self):
+        """How much louder the room is while speaking. None until both are known.
+
+        This exists because the acoustic path failing is INVISIBLE otherwise.
+        The speaker stayed paired, A2DP stayed up, PulseAudio kept accepting
+        audio and the monitor kept showing signal - every software layer
+        reported healthy - while nothing was actually coming out of the
+        speaker. It took a hand-built experiment to find, and it silently
+        disables barge-in and every acoustic test in tools/.
+
+        This box measured ~11x when it was working. A ratio near 1.0 means the
+        microphone cannot hear the speaker: it is powered off, turned down, or
+        has been moved.
+        """
+        if not self.ambient or not self.while_speaking:
+            return None
+        return self.while_speaking / max(self.ambient, 1e-9)
 
     def close(self):
         self.source.close()
@@ -548,4 +571,11 @@ class Ears(object):
                 "dropped": (self._drain.dropped
                             if self._drain is not None else 0),
                 "misses": list(self.misses[-6:]),
+                "ambient": (round(self._gate.ambient, 5)
+                            if self._gate is not None and self._gate.ambient
+                            else None),
+                "heard_ratio": (round(self._gate.heard_ratio(), 2)
+                                if self._gate is not None
+                                and self._gate.heard_ratio() else None),
+                "barges": self._gate.barges if self._gate is not None else 0,
                 "armed": time.monotonic() < self.armed_until}

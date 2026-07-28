@@ -259,6 +259,25 @@ def main(argv=None):
                   % (r.get("utterances"), r.get("wakes"), r.get("commands")))
             print("  microphone   %s" % (r.get("device") or "?"))
             print("  mic opens    %s" % r.get("opens"))
+            # The acoustic health check. Every software layer can report
+            # healthy while nothing is actually coming out of the speaker -
+            # paired, A2DP up, PulseAudio accepting audio, monitor showing
+            # signal - and the only symptom is that nothing acoustic works.
+            hr = r.get("heard_ratio")
+            if hr is None:
+                print("  speaker      not measured yet (say something first)")
+            elif hr < 1.5:
+                print("  speaker      *** NOT AUDIBLE TO THE MIC (%.2fx ambient)"
+                      % hr)
+                print("               barge-in and every acoustic test in "
+                      "tools/ are disabled by this.")
+                print("               the speaker is off, turned down, or has "
+                      "been moved. ~11x is healthy here.")
+            else:
+                print("  speaker      heard at %.1fx ambient (ambient %.4f)"
+                      % (hr, r.get("ambient") or 0))
+            if r.get("barges"):
+                print("  barge-ins    %s" % r.get("barges"))
             print("  last heard   %r" % (r.get("last_heard"),))
             for m in (r.get("misses") or []):
                 print("  near miss    %-16r %4.1fs  peak %.3f%s"
