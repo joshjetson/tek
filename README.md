@@ -949,7 +949,7 @@ for t in tests/*.py; do python3 "$t"; done
 | `hud_unit.py` | clock, scope and face panels | none |
 | `panic_unit.py` | the escape hatch, incl. a **real uinput keyboard** | root for the last part |
 | `voice_ears.py` | the self-hearing gate, wake/command logic, misheard wake words | none |
-| `voice_lipsync.py` | reads `/dev/fb0` while really speaking | display + voice |
+| `voice_lipsync.py` | reads `/dev/fb0` while really speaking | display + voice — **talks out loud, so it is skipped unless `TEK_AUDIBLE=1`** |
 | `mood_unit.py` | tag parsing on all three reply paths, the keyword fallback, that every offerable mood exists in the rig and actually moves the face | none |
 | `memory_unit.py` | stopwords, query building, decay, budget, migration checksums, and that a dead journal degrades rather than raises | none (the Postgres half self-skips) |
 

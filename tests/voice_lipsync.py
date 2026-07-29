@@ -7,6 +7,20 @@ through the real speaker - because "mouth frames were published" is not the
 same claim as "the mouth moved", and only the second one matters.
 
 Needs tek-display and tek-voice running.
+
+IT TALKS OUT LOUD, and is therefore SKIPPED by default. Set TEK_AUDIBLE=1 to
+run it.
+
+The project already draws this line - README section 6: "Three are disruptive
+and therefore live in tools/, not tests/". A test that says a sentence through
+the speaker in somebody's house is disruptive by the same standard, and it did
+not get the same treatment. Running the suite is a routine thing to do,
+including from a cron job or while a family is in the room, and it should not
+be a thing that makes the house talk. Reported from the sofa as "a random test
+that happens randomly".
+
+It stays in tests/ rather than moving to tools/ because it IS an assertion -
+it fails the build when lip-sync breaks, which nothing in tools/ does.
 """
 import mmap
 import os
@@ -22,6 +36,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 
 from tekdromo.voice import bus
+
+if os.environ.get("TEK_AUDIBLE", "").strip() not in ("1", "true", "yes"):
+    print("  SKIPPED - this test speaks out loud. TEK_AUDIBLE=1 to run it.")
+    print("VOICE LIPSYNC SKIPPED")
+    raise SystemExit(0)
 
 W, H = 1024, 600
 FAIL = []
