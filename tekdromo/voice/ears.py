@@ -112,6 +112,7 @@ class Gate(vio.Source):
         self.frames = 0
         self.barges = 0
         self.open_until = 0.0
+        self._barged_det = None       # the Detector we interrupted, if any
         self.ambient = None           # rms of the room with nothing playing
         self.while_speaking = None    # rms of the room while the speaker plays
         self._seen = None             # the detector we last calibrated
@@ -127,8 +128,27 @@ class Gate(vio.Source):
 
         # An interruption already happened: stay open and let the words the
         # person is still saying reach the segmenter.
+        #
+        # But ONLY for the utterance that was interrupted. If the service has
+        # started speaking again, the window is over regardless of the clock -
+        # otherwise the gate is held open across a NEW reply and the ear
+        # transcribes the speaker, which is the one thing it must never do.
+        # Observed exactly once, and it is unmistakable in the log:
+        #
+        #   interrupted (barge-in) ...
+        #   ears: heard 'as say bitter and nothing else number one say it now'
+        #
+        # That is TEK reading its own prompt back to itself. Detected by
+        # identity, not by time: service.barge is a fresh Detector per
+        # utterance, so a different object means a different reply.
         if now < self.open_until:
-            return frame
+            if (getattr(self.service, "speaking", False)
+                    and getattr(self.service, "barge", None)
+                    is not self._barged_det):
+                self.open_until = 0.0
+                self._barged_det = None
+            else:
+                return frame
 
         if getattr(self.service, "speaking", False):
             self.until = now + self.tail
@@ -155,6 +175,7 @@ class Gate(vio.Source):
                         self.barges += 1
                         self.until = 0.0
                         self.open_until = now + self.BARGE_OPEN_S
+                        self._barged_det = det
                         return frame
                 except Exception:
                     # A detector fault must not deafen the ear. Falling back to
