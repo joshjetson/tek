@@ -1320,6 +1320,35 @@ started again from zero and never reached 300 ms.
 
 `tek interrupt` is separately verified — a ~22 s reply stopped at 6.8 s.
 
+### It only stops for someone talking TO it
+
+Voice-presence is a narrower claim than it sounds, and it is not the one that
+should stop a reply. In a family home there is nearly always a second voice
+somewhere — a child downstairs, a television through a wall, someone on the
+phone in the hall. A detector firing on any of them is not wrong about the
+acoustics and is still wrong about the behaviour: it interrupts an answer
+because of a conversation it has nothing to do with.
+
+So the residual must also clear `NEAR_MULT × ambient` (5×) before it counts.
+Loudness at the mic is the cheapest proxy for proximity available without extra
+hardware — two microphones would give real direction, a direct-to-reverberant
+ratio would give real distance, and both are large changes to answer a question
+this mostly settles.
+
+| the bench, three ways | |
+|---|---|
+| echo only, 135 trials | **0** false stops |
+| echo + a NEAR voice, 54 trials | **0** missed |
+| echo + a DISTANT voice, 54 trials | **0** wrongly interrupted |
+
+> **The 5× default is not yet validated in a real room.** Ambient here is
+> 0.0044–0.0055 rms and the one confirmed barge-in peaked at 0.0568 residual,
+> about 10× ambient — so 5× sits below it with margin. Where *distant* household
+> speech lands is unmeasured, because that needs somebody talking at a known
+> distance. Every rejection is counted (`too_far`, `peak_far` in `tek barge`),
+> so the real separation can be read off a day of use rather than guessed at
+> twice.
+
 **Getting here needed the acoustic path fixed first**, and that is why the
 health check exists. Every earlier attempt failed with `corr` peaking at 0.12,
 which reads identically to "the threshold is too strict" and is actually "there

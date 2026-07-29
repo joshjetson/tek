@@ -91,12 +91,12 @@ def sweep():
     print("  false stops: %d / %d trials" % (false_stops, trials))
 
     print()
-    print("Echo + a second voice at 2.0s - a MISS here is a failure to notice")
+    print("Echo + a NEAR voice at 2.0s - a MISS here is a failure to notice")
     misses = trials2 = 0
     lats = []
     for lag in (0.05, 0.18, 0.32):
         for gain in (0.35, 0.55, 0.80):
-            for vg in (0.15, 0.30, 0.50):
+            for vg in (0.30, 0.50):                 # loud: someone addressing it
                 for seed in range(3):
                     t, st = trial(voice_at=2.0, lag_s=lag, echo_gain=gain,
                                   seed=seed, voice_gain=vg)
@@ -111,7 +111,24 @@ def sweep():
         print("  time to notice: median %.0f ms, p90 %.0f ms  (hold is %.0f ms)"
               % (lats[len(lats) // 2] * 1000, lats[int(len(lats) * 0.9)] * 1000,
                  bargein.HOLD_S * 1000))
-    return false_stops, misses
+
+    # The proximity gate, which is the whole reason a family home is a harder
+    # environment than a quiet one. A child downstairs IS a second voice, so
+    # voice-presence alone is not the question - "is it aimed at me" is.
+    print()
+    print("Echo + a DISTANT voice at 2.0s - a STOP here is the wrong behaviour")
+    wrong = trials3 = 0
+    for lag in (0.05, 0.18, 0.32):
+        for gain in (0.35, 0.55, 0.80):
+            for vg in (0.06, 0.12):                 # quiet: elsewhere in the house
+                for seed in range(3):
+                    t, _ = trial(voice_at=2.0, lag_s=lag, echo_gain=gain,
+                                 seed=seed, voice_gain=vg)
+                    trials3 += 1
+                    if t is not None:
+                        wrong += 1
+    print("  interrupted for a distant voice: %d / %d trials" % (wrong, trials3))
+    return false_stops, misses + wrong
 
 
 def live(hours):

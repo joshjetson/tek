@@ -118,6 +118,34 @@ AMBIENT_MULT = 1.8            # a frame must beat ambient by this to be signal
 MIN_LEVEL_ABS = 1e-4          # a guard against an ambient estimate of zero
 MIN_LEVEL = 0.012             # only the fallback when no ambient is supplied
 
+# PROXIMITY. The residual must also be this many times ambient before it counts
+# as somebody addressing the device, and this is a second, higher bar than
+# AMBIENT_MULT above - that one asks "is this signal at all", this one asks "is
+# it close".
+#
+# The rise test alone answers "is a second voice present", which is a narrower
+# claim than it sounds and not the one that should stop a reply. In a family
+# home there is nearly always a second voice somewhere: a child downstairs, a
+# television through a wall, someone on the phone in the hall. All of them are
+# genuinely voices, so a detector that fires on voice-presence is not wrong
+# about the acoustics and is still wrong about the behaviour - it interrupts
+# an answer because of a conversation it has nothing to do with.
+#
+# Loudness at the microphone is the cheapest proxy for proximity available
+# here, and it needs no extra hardware. Two microphones would give real
+# direction (see the roadmap), and a direct-to-reverberant ratio would give
+# real distance, but both are large changes to answer a question that
+# "is it loud enough to be aimed at me" mostly settles.
+#
+# THE DEFAULT IS NOT YET VALIDATED. What is known: ambient in this room is
+# 0.0044-0.0055 rms, and the one confirmed barge-in peaked at 0.0568 residual,
+# about 10x ambient. What is NOT known is where distant household speech lands,
+# because measuring that needs somebody talking at a known distance. 5.0 sits
+# below the single confirmed near event with margin, and every rejection is
+# counted and logged so the real separation can be read off a day of use
+# instead of guessed at twice.
+NEAR_MULT = 5.0
+
 
 class Reference(object):
     """The outgoing audio, at pcm.RATE, indexed by when it will be audible.
@@ -210,6 +238,15 @@ class Detector(object):
         # What counts as "not silence" in THIS room. See AMBIENT_MULT.
         self.min_level = (max(MIN_LEVEL_ABS, ambient * AMBIENT_MULT)
                           if ambient else MIN_LEVEL)
+        # ...and what counts as CLOSE ENOUGH to be talking to it. See NEAR_MULT.
+        self.near_level = (max(MIN_LEVEL_ABS, ambient * NEAR_MULT)
+                           if ambient else MIN_LEVEL * (NEAR_MULT / AMBIENT_MULT))
+        # Frames that looked like a voice but were too quiet to be aimed here.
+        # This is the tuning data: if it climbs while barge-in never fires, the
+        # gate is too high; if it stays zero and replies still stop for
+        # nothing, it is too low.
+        self.too_far = 0
+        self.peak_far = 0.0
         self.floor = None             # residual rms with nobody talking
         self._floor_acc = []
         self.lag = 0.0                # refinement on top of ref.latency
@@ -387,8 +424,15 @@ class Detector(object):
             self._floor_acc = []
             return False
 
-        loud = r_rms > self.min_level and r_rms > self.rise * max(
+        voice = r_rms > self.min_level and r_rms > self.rise * max(
             self.floor, self.min_level / 2)
+        # A voice, but is it aimed here? Counted rather than silently dropped -
+        # "it never interrupts" and "it interrupts constantly" need different
+        # fixes and look identical without this number.
+        loud = voice and r_rms >= self.near_level
+        if voice and not loud:
+            self.too_far += 1
+            self.peak_far = max(self.peak_far, r_rms)
         if loud:
             self.over += step
             if self.over >= self.hold_s:
@@ -404,6 +448,9 @@ class Detector(object):
     def state(self):
         return {"locked": self.locked, "corr": round(self.corr, 3),
                 "min_level": round(self.min_level, 5),
+                "near_level": round(self.near_level, 5),
+                "too_far": self.too_far,
+                "peak_far": round(self.peak_far, 4),
                 "cancels": round(self.cancels, 3),
                 "lag_ms": round(self.lag * 1000, 1),
                 "floor": None if self.floor is None else round(self.floor, 4),
