@@ -83,6 +83,29 @@ CACHE_S = 900.0
 MIC_GAIN_PCT = 100
 
 
+# What a wake word that WORKS looks like at the microphone, measured with
+# tools/wake_tune.py rather than assumed. Six consecutive successful attempts
+# at a normal speaking distance peaked between 0.49 and 0.75, while a
+# real-world failure the same evening peaked at 0.205 - about three times
+# quieter, and the only difference between them.
+#
+# The hint used to fire below 0.05, which is essentially "the microphone is
+# dead" and useless as advice: at 0.205 it said nothing at all, so the one
+# person who could have fixed it by stepping closer had no idea that was the
+# problem. Recognition does not fail at a cliff, so neither does the hint.
+WAKE_PEAK_GOOD = 0.45
+WAKE_PEAK_WEAK = 0.20
+
+
+def _level_hint(peak):
+    """Advice a person can act on, attached to the miss it explains."""
+    if peak < WAKE_PEAK_WEAK:
+        return "  <- far too quiet; much closer, or speak up"
+    if peak < WAKE_PEAK_GOOD:
+        return "  <- quiet; attempts that work here peak above %.2f" % WAKE_PEAK_GOOD
+    return ""
+
+
 class Gate(vio.Source):
     """Passes the microphone through, except while the face is speaking.
 
@@ -525,8 +548,7 @@ class Ears(object):
             # got away.
             if spotted and spotted != "[unk]":
                 print("ears: NEAR MISS %r (%.1fs, peak %.3f)%s"
-                      % (spotted, secs, peak,
-                         "  <- very quiet" if peak < 0.05 else ""), flush=True)
+                      % (spotted, secs, peak, _level_hint(peak)), flush=True)
             return
         self.wakes += 1
 

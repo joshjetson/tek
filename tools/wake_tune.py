@@ -70,7 +70,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rounds", type=int, default=5)
     ap.add_argument("--phrase", default="hey tek")
-    ap.add_argument("--seconds", type=float, default=3.0)
+    ap.add_argument("--seconds", type=float, default=4.0)
     a = ap.parse_args()
 
     device = vio.working_source()
@@ -88,11 +88,19 @@ def main():
     heard = []
     for i in range(1, a.rounds + 1):
         say("Number %d. Say it now." % i)
-        # The speaker needs a moment to stop - without it the tail of "say it
-        # now" lands in the recording and the decoder transcribes TEK instead
-        # of the person.
-        time.sleep(0.5)
+        # 0.5s of dead time here clipped the leading "hey" on 2 of 5 attempts -
+        # the grammar came back '[unk] tek', meaning the distinctive word
+        # survived and the carrier did not. That is the tool truncating the
+        # speaker, not the ear failing, and the two are indistinguishable in
+        # the result. Kept short enough not to lose a fast reply, and the
+        # window is long enough to cover a slow one.
+        time.sleep(0.15)
         samples = record(device, a.seconds)
+        # Report where the speech actually sat in the window, so a clipped
+        # start is visible as a number rather than inferred from a bad decode.
+        env = np.abs(samples.astype(np.int32)).astype(np.float32) / 32768.0
+        loud = np.where(env > 0.05)[0]
+        onset = (loud[0] / float(pcm.RATE)) if len(loud) else -1.0
         if not len(samples):
             print("  %d. no audio" % i)
             continue
@@ -106,8 +114,9 @@ def main():
             heard.append(f)
         sim = max([difflib.SequenceMatcher(None, f, w).ratio()
                    for w in stt.WAKE_WORDS] or [0.0])
-        print("  %d. %-5s peak %.3f rms %.4f | grammar %-14r | free %-24r sim %.2f"
-              % (i, "FIRED" if ok else "miss", peak, rms, g, f, sim))
+        print("  %d. %-5s peak %.3f onset %+.2fs | grammar %-14r | free %-24r sim %.2f%s"
+              % (i, "FIRED" if ok else "miss", peak, onset, g, f, sim,
+                 "  <- CLIPPED START" if 0 <= onset < 0.12 else ""))
 
     print()
     print("  fired %d of %d" % (fired, a.rounds))
