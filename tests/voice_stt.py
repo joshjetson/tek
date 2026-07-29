@@ -146,6 +146,19 @@ for variant in stt.WAKE_WORDS:
 # under load before being measured, because Piper's own output varies slightly
 # run to run. The collision is accepted: someone has to say "high tech" as a
 # complete utterance, and the cost is that it listens for a moment.
+#
+# HOW FLAKY, measured rather than felt: 14 consecutive runs on this box gave 11
+# passes and 3 failures, the failures clustered in one window and spread across
+# TWO different assertions - this one, and "first segment survives segmentation
+# intact" further down. A following 8 runs at a HIGHER load average (4.99
+# against 4.26 when it failed) passed 8 of 8, so it is not CPU contention,
+# which was the obvious theory and the wrong one.
+#
+# Both failing assertions share a dependency: they compare what Vosk decodes
+# from audio Piper has just synthesised, so they inherit any variation in
+# either. Treat a single failure here as a prompt to re-run, and only chase it
+# if it repeats - but do NOT quietly delete the assertions, because they are
+# the ones guarding precision against the wake-word variants.
 for ordinary in ("take the bins out", "check the oven please",
                  "hey there how are you",
                  "okay then lets go", "hey mum"):
