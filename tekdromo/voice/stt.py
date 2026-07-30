@@ -76,6 +76,10 @@ class Recogniser(object):
     def __init__(self, grammar=None, path=DEFAULT_MODEL):
         import vosk
         self.grammar = grammar
+        # Set by transcribe(); None until it has run.
+        self.last_conf = None
+        self.last_min_conf = None
+        self.last_words = 0
         self._vosk = vosk
         self._path = path
         self.rec = self._new()
@@ -110,11 +114,35 @@ class Recogniser(object):
             self.rec = self._new()
 
     def transcribe(self, samples):
-        """A complete utterance -> text. Empty string if nothing was heard."""
+        """A complete utterance -> text. Empty string if nothing was heard.
+
+        Also records per-word confidence on `last_conf`, because the text alone
+        cannot tell a real sentence from a confident hallucination. A small
+        model with a 200k vocabulary MUST choose something for every sound it
+        segments, so distant speech does not come back empty or garbled - it
+        comes back as fluent, plausible, entirely wrong English:
+
+            heard: "more or killed either way she didn't know what it was
+                    like before remain heated know what's this"
+
+        The brain then answers that, which is what "it says odd things" looks
+        like from the room. Reading the confidence is the only way to tell that
+        case from a sentence somebody actually said.
+        """
         self.reset()
+        try:
+            self.rec.SetWords(True)
+        except Exception:
+            pass
         data = np.asarray(samples, dtype=pcm.DTYPE).tobytes()
         self.rec.AcceptWaveform(data)
-        return json.loads(self.rec.FinalResult()).get("text", "").strip()
+        res = json.loads(self.rec.FinalResult())
+        words = res.get("result") or []
+        confs = [w.get("conf", 0.0) for w in words]
+        self.last_conf = (sum(confs) / len(confs)) if confs else None
+        self.last_min_conf = min(confs) if confs else None
+        self.last_words = len(confs)
+        return res.get("text", "").strip()
 
     def stream(self, source):
         """Yield (final, text) as audio arrives. final=False is a partial.

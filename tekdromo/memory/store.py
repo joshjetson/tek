@@ -42,7 +42,7 @@ def record(event, said=None, spoke=False, decided_ms=None, model=None,
     """
     d = database or _db.db()
     extra = {}
-    for k in ("faces", "reason", "cooldown", "source"):
+    for k in ("faces", "reason", "cooldown", "source", "conf", "min_conf"):
         if event.get(k) is not None:
             extra[k] = event[k]
     return d.execute(

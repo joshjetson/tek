@@ -566,7 +566,9 @@ class Ears(object):
                               "say it again to carry on" % self.followups,
                               flush=True)
                 self._auto_armed = False
-                self._command(text, secs)
+                self._command(text, secs,
+                              getattr(self.free, "last_conf", None),
+                              getattr(self.free, "last_min_conf", None))
             else:
                 # Do NOT disarm. The window belongs to the person, not to the
                 # first scrap of audio that happens to land in it - and after a
@@ -646,12 +648,16 @@ class Ears(object):
             print("ears: woken (%.1fs) - waiting %.0fs for a command"
                   % (secs, self.window), flush=True)
 
-    def _command(self, text, secs=0.0):
+    def _command(self, text, secs=0.0, conf=None, min_conf=None):
         """Hand a heard command to the service's event pipeline."""
         self.commands += 1
         self.last_heard = text
-        print("ears: heard %r (%.1fs)" % (text, secs), flush=True)
+        print("ears: heard %r (%.1fs, conf %s/%s)"
+              % (text, secs,
+                 "-" if conf is None else "%.2f" % conf,
+                 "-" if min_conf is None else "%.2f" % min_conf), flush=True)
         ev = {"kind": "speech", "heard": text,
+              "conf": conf, "min_conf": min_conf,
               "what": 'Someone spoke to you and said: "%s"' % text}
         # If the display has a recent frame, let the brain see who is talking.
         try:
