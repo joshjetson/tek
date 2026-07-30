@@ -301,10 +301,27 @@ class VoiceService(object):
         self.barges = 0
         self.last_barge = None        # its state() at the moment it fired
         self._interrupt = threading.Event()
-        self.watching = True
+        # Camera-triggered speech is OFF unless somebody asks for it.
+        #
+        # It was on by default and NOT persisted, so `tek watch off` lasted
+        # until the next restart and then quietly came back. Reported as "this
+        # is talking way too much on its own, I'm just walking around and it's
+        # saying random stuff" - which is precisely what the feature does when
+        # nobody asked it to.
+        #
+        # Opt-in is the right default for a camera that speaks. README section
+        # 9 already argues the failure mode of an always-on camera with a voice
+        # is not "it missed something" but "it will not shut up", and section
+        # 11 argues that anything a device does unprompted in a home should be
+        # a choice somebody made. A device that answers when spoken to and is
+        # otherwise silent is the version nobody has to defend.
+        #
+        # `tek watch on` enables it, and now sticks.
+        cfg0 = load_settings()
+        self.watching = bool(cfg0.get("watching", False))
         # The ear, if there is a microphone. Separate switch from `watching`:
         # "stop watching me" and "stop listening to me" are different requests.
-        self.listening = True
+        self.listening = bool(cfg0.get("listening", True))
         self.ears = None
         self.mic = None               # PulseAudio source; None = the default
         self.cooldown = float(cooldown)
@@ -379,6 +396,9 @@ class VoiceService(object):
         if cmd == "watch":
             if "on" in msg:
                 self.watching = bool(msg["on"])
+                # Persisted, or the switch is a suggestion until the next
+                # restart - which is how it kept turning itself back on.
+                save_settings({"watching": self.watching})
             if "cooldown" in msg:
                 self.cooldown = max(0.0, float(msg["cooldown"]))
             return {"ok": True, "watching": self.watching,
@@ -394,6 +414,9 @@ class VoiceService(object):
         # "ears", not "listen": `tek listen` already means "print the mouth
         # frames as they are published", and two different meanings for one
         # word in the same tool is a trap for whoever reads it next.
+        if cmd == "ears" and "on" in msg:
+            save_settings({"listening": bool(msg["on"])})
+
         if cmd == "ears":
             if "on" in msg:
                 self.listening = bool(msg["on"])

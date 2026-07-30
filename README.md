@@ -1169,7 +1169,16 @@ camera sees something  ->  debounce  ->  cooldown  ->  a model looks at the
 Silence is a first-class outcome, not a failure. A face that comments on every
 arrival is unbearable within a day.
 
+**Camera-triggered speech is OFF by default** and has to be asked for. It was
+on, and not persisted, so `tek watch off` lasted until the next restart and
+then quietly came back — reported from the room as *"this is talking way too
+much on its own, I'm just walking around and it's saying random stuff"*. That
+is exactly what the feature does when nobody asked for it. A device that
+answers when spoken to and is otherwise silent is the version nobody has to
+defend. The switch now sticks.
+
 ```bash
+tek watch on              # opt in to camera-triggered speech
 tek watch                 # is it on, what is the cooldown, how many events
 tek watch off             # stop it acting on camera events
 tek watch --cooldown 600  # be less talkative

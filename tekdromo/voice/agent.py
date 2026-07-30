@@ -40,9 +40,28 @@ MOODS = ("neutral", "amused", "happy", "concerned", "confused",
          "surprised", "thinking")
 
 # Accepts [amused] and (amused), any case, with or without surrounding space.
-# Anchored at the start only: a bracketed word mid-sentence is text, not a tag.
 _MOOD_RE = re.compile(r"^\s*[\[(]\s*(%s)\s*[\])]\s*" % "|".join(MOODS),
                       re.IGNORECASE)
+
+# The same tag ANYWHERE, because the model does not reliably put it first.
+# Observed being read aloud, which is the whole failure this exists to avoid:
+#
+#   said ... I'll look at what the camera sees first.[confused] Josh, tha...
+#
+# Anchoring at position 0 was the original rule, on the reasoning that a
+# bracketed word mid-sentence is text rather than a tag. That reasoning is
+# sound for arbitrary brackets and wrong for THESE: the seven mood words in
+# square brackets are a vocabulary this project invented, and a person does not
+# type "[confused]" mid-sentence. Stripping them everywhere costs a false
+# positive nobody will ever hit, and not stripping them costs the face reading
+# stage directions out loud.
+# SQUARE brackets only, unlike the anchored form above which also takes round
+# ones. A leading "(amused)" is unambiguously a tag because nothing else starts
+# a spoken reply that way, but "(happy)" in the MIDDLE of a sentence is ordinary
+# prose a person might genuinely write and have read out. "[confused]" mid
+# sentence is not - square brackets around one of seven invented mood words is
+# a vocabulary this project made up.
+_MOOD_ANY = re.compile(r"\[\s*(%s)\s*\]" % "|".join(MOODS), re.IGNORECASE)
 
 # Keyword fallback for when the tag is missing - an older model, a refusal to
 # follow the format, or a reply reconstructed from a stream that lost its head.
@@ -449,6 +468,7 @@ class ClaudeBrain(Brain):
 
         deadline = time.time() + self.timeout
         head, opened, sent = "", False, 0
+        tail = {"buf": ""}       # a partial "[mo" held back across chunks
         try:
             for line in p.stdout:
                 if time.time() > deadline:
@@ -496,6 +516,24 @@ class ClaudeBrain(Brain):
                     piece, head = head, ""
                 if sent >= limit:
                     break
+                # A tag can arrive mid-stream, in which case it reaches the
+                # speaker unless it is removed here as well - build_prompt asks
+                # for it first, and the model does not always oblige. Held back
+                # while an opening bracket is incomplete, because half a tag is
+                # unstrippable once it has been spoken.
+                pend = tail["buf"] + piece
+                cut = pend.rfind("[")
+                if cut >= 0 and "]" not in pend[cut:] and len(pend) - cut < 16:
+                    tail["buf"] = pend[cut:]
+                    pend = pend[:cut]
+                else:
+                    tail["buf"] = ""
+                mood2, pend = split_mood(pend)
+                if mood2 and not self.last_mood:
+                    self.last_mood = mood2
+                if not pend:
+                    continue
+                piece = pend
                 yield piece
                 sent += len(piece)
         finally:
@@ -515,17 +553,26 @@ class ClaudeBrain(Brain):
 
 
 def split_mood(text):
-    """(mood, text) - the leading [tag] removed. mood is None if absent.
+    """(mood, text) - every [tag] removed, first one wins. None if absent.
 
     Stripping is not optional: everything returned here is read ALOUD, so a tag
-    that survives is the face saying the word "amused" before its sentence.
+    that survives is the face saying the word "confused" mid-sentence.
     """
     if not text:
         return None, text
+    mood = None
     m = _MOOD_RE.match(text)
-    if not m:
-        return None, text
-    return m.group(1).lower(), text[m.end():]
+    if m:
+        mood = m.group(1).lower()
+        text = text[m.end():]
+    inline = _MOOD_ANY.search(text)
+    if inline:
+        if mood is None:
+            mood = inline.group(1).lower()
+        # Collapse the space the tag leaves behind, so "first.[confused] Josh"
+        # does not become "first. Josh" with a double gap the voice pauses on.
+        text = re.sub(r"\s+", " ", _MOOD_ANY.sub(" ", text)).strip()
+    return mood, text
 
 
 def guess_mood(text):

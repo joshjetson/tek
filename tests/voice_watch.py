@@ -123,6 +123,14 @@ sock = os.path.join(tempfile.mkdtemp(prefix="tekwatch"), "v.sock")
 # 5s model load to make its point.
 svc = service.VoiceService(voice="espeak", path=sock, cooldown=60.0)
 svc.brain = agent.StubBrain(reply=None)
+# Camera-triggered speech is OPT-IN now, so this has to ask for it. It used to
+# be on by default and unpersisted, which meant `tek watch off` lasted until
+# the next restart and then quietly came back - reported as "this is talking
+# way too much on its own, I'm just walking around and it's saying random
+# stuff". A camera that speaks unprompted should be a choice somebody made.
+check("camera-triggered speech is off unless asked for",
+      svc.watching is False, svc.watching)
+svc.watching = True
 
 r = svc.on_event({"kind": "arrival", "faces": 1})
 check("an arrival is considered", r.get("acted") is True, r)
