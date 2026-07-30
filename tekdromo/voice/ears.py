@@ -53,6 +53,37 @@ WAKE_WINDOW = 8.0
 # later is not taken as addressed to it.
 FOLLOWUP_S = 12.0
 
+# How many follow-ups in a row before the wake word is required again.
+#
+# Without a cap this is a self-sustaining loop, and it was observed being one:
+# a single wake at 21:48:37 produced nine "commands" over seven minutes, none
+# of them addressed to the device. Every reply refreshes gate.spoke_at, which
+# re-opens the window, which accepts the next thing said, which produces
+# another reply. Anybody talking in the room keeps it alive indefinitely, and
+# from the sofa that reads as "the mic is too sensitive" - the microphone is
+# fine, the exit condition is missing.
+#
+# Three is a real conversation - a question, a follow-up, and a clarification -
+# and short enough that a runaway costs three exchanges rather than an evening.
+FOLLOWUP_MAX_TURNS = 3
+
+# A follow-up has to be SAID TO IT, not merely audible. Measured with
+# tools/wake_tune.py: deliberate speech at a normal distance peaks 0.49-0.75,
+# and the junk that got through this window peaked far below that. This is the
+# same argument as the barge-in proximity gate - in a house there is nearly
+# always a voice somewhere, and "audible" is not the question.
+#
+# Only applied to FOLLOW-UPS. A command after an explicit wake word has already
+# proved it was addressed here, and holding it to a level bar as well would
+# make the device ignore somebody who had just said its name.
+FOLLOWUP_MIN_PEAK = 0.20
+
+# Junk transcripts to refuse outright. "the", "i went what" and "right away
+# from me again" were all dispatched as questions. A follow-up worth answering
+# is at least a few words, because the free decoder emits fragments from room
+# noise and each one costs a model call and an unprompted reply.
+FOLLOWUP_MIN_WORDS = 3
+
 # Silence fed to the segmenter after the last sample is written, covering the
 # speaker's own buffer and the room's reverb tail. A2DP alone is 150-250 ms.
 SPEAK_TAIL = 1.2
@@ -334,6 +365,8 @@ class Ears(object):
         self.free = None
         self.seg = None
         self.armed_until = 0.0
+        # Consecutive commands taken WITHOUT a wake word. Reset by a real one.
+        self.followups = 0
         self.utterances = 0
         self.wakes = 0
         self.commands = 0
@@ -498,10 +531,13 @@ class Ears(object):
         # a reply, and demanding the wake word again before every single
         # sentence is the main reason this did not feel like a conversation.
         gate = self._gate
+        peak = float(np.abs(samples.astype(np.int32)).max()) / 32768.0
         if (gate is not None and gate.spoke_at
                 and time.monotonic() - gate.spoke_at < FOLLOWUP_S
-                and time.monotonic() >= self.armed_until):
+                and time.monotonic() >= self.armed_until
+                and self.followups < FOLLOWUP_MAX_TURNS):
             self.armed_until = time.monotonic() + self.window
+            self._auto_armed = True
 
         if time.monotonic() < self.armed_until:
             # Already woken: this is the command, whatever it is.
@@ -509,8 +545,27 @@ class Ears(object):
             # Saying the wake word twice is a normal thing to do when the
             # first one seemed to go unheard. Dispatching the second one as
             # the question gets an answer to "hey tek", which is nonsense.
+            auto = getattr(self, "_auto_armed", False)
+            words = len((text or "").split())
+            if text and not stt.wake_only(text) and auto and (
+                    peak < FOLLOWUP_MIN_PEAK or words < FOLLOWUP_MIN_WORDS):
+                # Audible, but not addressed here. Refused rather than
+                # answered, and logged with the numbers so the thresholds can
+                # be tuned from what a house actually does.
+                print("ears: not addressed %r (peak %.3f, %d words) - ignoring"
+                      % (text, peak, words), flush=True)
+                self.armed_until = 0.0
+                self._auto_armed = False
+                return
             if text and not stt.wake_only(text):
                 self.armed_until = 0.0
+                if auto:
+                    self.followups += 1
+                    if self.followups >= FOLLOWUP_MAX_TURNS:
+                        print("ears: %d follow-ups without a wake word - "
+                              "say it again to carry on" % self.followups,
+                              flush=True)
+                self._auto_armed = False
                 self._command(text, secs)
             else:
                 # Do NOT disarm. The window belongs to the person, not to the
@@ -551,6 +606,11 @@ class Ears(object):
                       % (spotted, secs, peak, _level_hint(peak)), flush=True)
             return
         self.wakes += 1
+        # An explicit wake word is the person saying "yes, I mean you". It
+        # clears the follow-up budget so a real conversation is never cut off
+        # by a cap that exists to stop an unattended one.
+        self.followups = 0
+        self._auto_armed = False
 
         # Was there anything AFTER the wake word? The grammar already knows:
         # it emits "hey tek" for the wake word alone and "hey tek [unk]" when
@@ -621,4 +681,5 @@ class Ears(object):
                                 if self._gate is not None
                                 and self._gate.heard_ratio() else None),
                 "barges": self._gate.barges if self._gate is not None else 0,
+                "followups": self.followups,
                 "armed": time.monotonic() < self.armed_until}

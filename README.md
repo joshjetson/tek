@@ -698,6 +698,23 @@ reporting itself perfectly healthy and hearing nothing. `io.working_source()`
 probes candidates for a *varying* signal, because a dead input is not silent,
 it is constant.
 
+**It must not start conversations nobody began.** After a reply it listens for
+12 s without needing the wake word, because saying "hey tek" before every
+sentence is why it felt like operating a machine. But every reply refreshes
+that window, so with no cap it is a self-sustaining loop — observed live as one
+wake word at 21:48 producing **nine "commands" over seven minutes**, none of
+them addressed to it. From the room that reads as "the mic is too sensitive";
+the mic is fine, the exit condition was missing. Three things bound it now:
+
+| | |
+|---|---|
+| `FOLLOWUP_MAX_TURNS` = 3 | then the wake word is required again |
+| `FOLLOWUP_MIN_PEAK` = 0.20 | it has to be said *to* it — deliberate speech measures 0.49–0.75 |
+| `FOLLOWUP_MIN_WORDS` = 3 | `"the"` and `"i went what"` were being dispatched as questions |
+
+None of these apply after an explicit wake word: somebody who just said the
+device's name has already proved they meant it.
+
 **It must not go quietly deaf.** Neither "wrong device" nor "no frames" ends the
 stream, so a reader just sits blocked forever. A watchdog closes the source to
 break it loose and the reader re-probes.

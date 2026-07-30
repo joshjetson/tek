@@ -104,6 +104,8 @@ def make_ears(wake_script, free_script):
     e.service = FakeService()
     e.window = 8.0
     e.armed_until = 0.0
+    e.followups = 0
+    e._auto_armed = False
     e.utterances = e.wakes = e.commands = e.opens = 0
     e.last_heard = None
     e.misses = []
@@ -117,6 +119,13 @@ def make_ears(wake_script, free_script):
 
 
 DUMMY = pcm.silence(pcm.RATE)          # one second, contents irrelevant
+# ...except where LEVEL is part of the decision. A follow-up has to be said TO
+# the device, and the gate that enforces that reads the samples, so a follow-up
+# which is supposed to be accepted has to actually be loud. Peak ~0.6 matches
+# what tools/wake_tune.py measured for deliberate speech at a normal distance.
+SPOKEN = (pcm.silence(pcm.RATE).astype(np.int32) +
+          (np.sin(np.arange(pcm.RATE) * 0.05) * 0.6 * 32767)
+          .astype(np.int32)).astype(np.int16)
 
 # Ordinary conversation: the wake grammar returns junk, and the free decoder
 # must NEVER be reached. This is the privacy guarantee, as a test.
@@ -249,9 +258,59 @@ class _Gate(object):
 
 e = make_ears(["[unk]"], ["yes please tell me more"])
 e._gate = _Gate(time.monotonic())          # it just finished speaking
-e._utterance(DUMMY)
+e._utterance(SPOKEN)
 check("straight after a reply, a follow-up needs no wake word",
       [ev.get("heard") for ev in e.service.events] == ["yes please tell me more"],
+      e.service.events)
+
+# -- but the follow-up window must not become a conversation nobody started --
+# Observed live: one wake word at 21:48 produced nine "commands" over seven
+# minutes, none of them addressed to the device. Every reply refreshes
+# spoke_at, which re-arms the window, which takes the next thing said. From
+# the room it reads as "the mic is too sensitive"; the mic is fine.
+
+e = make_ears(["[unk]"] * 9, ["tell me more about that"] * 9)
+for _ in range(6):
+    e._gate = _Gate(time.monotonic())      # it replied again each time
+    e.armed_until = 0.0
+    e._utterance(SPOKEN)
+check("a follow-up chain is capped, not endless",
+      len(e.service.events) == ears.FOLLOWUP_MAX_TURNS,
+      "%d commands from %d attempts" % (len(e.service.events), 6))
+
+# An explicit wake word means "yes, I mean you" and restores the budget.
+e.wakes_before = len(e.service.events)
+e.followups = 0
+e._gate = _Gate(time.monotonic())
+e.armed_until = 0.0
+e._utterance(SPOKEN)
+check("saying the wake word again carries the conversation on",
+      len(e.service.events) == e.wakes_before + 1, e.service.events)
+
+# Audible but not addressed here: too quiet.
+e = make_ears(["[unk]"], ["tell me more about that"])
+e._gate = _Gate(time.monotonic())
+e._utterance(DUMMY)                        # silence: peak 0
+check("a quiet follow-up is refused, not answered", e.service.events == [],
+      e.service.events)
+
+# Audible and close, but not a sentence. "the", "i went what" and "right away
+# from me again" were all dispatched as questions.
+e = make_ears(["[unk]"], ["the"])
+e._gate = _Gate(time.monotonic())
+e._utterance(SPOKEN)
+check("a two-word fragment is refused, not answered", e.service.events == [],
+      e.service.events)
+
+# None of this applies after an explicit wake word - somebody who just said
+# the device's name has already proved they meant it, so neither the level bar
+# nor the word-count bar is applied. A bare wake word ARMS; the command is the
+# utterance after it.
+e = make_ears(["hey tek", "[unk]"], ["the"])
+e._utterance(DUMMY)                        # the wake word: arms
+e._utterance(DUMMY)                        # short AND silent, and still taken
+check("after a real wake word, a short quiet command still counts",
+      [ev.get("heard") for ev in e.service.events] == ["the"],
       e.service.events)
 
 e = make_ears(["[unk]"], ["someone talking about something else"])
