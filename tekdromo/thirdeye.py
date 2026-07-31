@@ -24,10 +24,11 @@ import numpy as np
 # Where it sits, in the head's own coordinates. Above the brow, on the midline,
 # and slightly proud of the surface so it is never swallowed by a contour line
 # passing through the same place.
-# y was swept against the rendered head rather than guessed: 0.62 put the star
-# on the bridge of the nose, 1.10 pushed it over the crown, and 0.95 sits on
-# the forehead centred above the brow.
-POS = (0.0, 0.95, 0.46)
+# y was swept against the rendered head rather than guessed. 0.62 put the star
+# on the bridge of the nose and 1.10 pushed it over the crown; 0.95 read as too
+# high from the sofa, and below 0.86 it starts to touch the brow contour. 0.90
+# is the middle of the band that is clearly forehead and clearly not brow.
+POS = (0.0, 0.90, 0.46)
 
 # Radius of the star, in the same units. Big enough to read across a room at
 # 1024x600, small enough not to compete with the face it sits on.
