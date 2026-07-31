@@ -27,7 +27,7 @@ import cv2
 import numpy as np
 
 from . import (contour, framebuffer, geometry, hud, phosphor, rig, speech,
-               starfield, voice_link)
+               starfield, thirdeye, voice_link)
 from .voice import bus
 
 # How long a presence change must persist before it counts as an event. Below
@@ -610,6 +610,17 @@ class Display:
                     faint.append(self.clock.dim_points())
                 if self.scope is not None:
                     panels.append(self.scope.points())
+                # The third eye: spinning while the channel is open, so
+                # "it is your turn" is visible and not merely inferred from
+                # silence. Projected with the head's own transform so it turns
+                # with the face instead of floating in front of it.
+                if self.mouth.channel_open:
+                    try:
+                        panels.append(thirdeye.segments(
+                            t, self.w, self.h, (rx, ry, 0.0),
+                            self.a.dist, self.a.fov, geometry))
+                    except Exception:
+                        pass
                 if self.face_panel is not None:
                     # None when nobody is there, which the panel draws as a
                     # "no signal" cross rather than an empty box.

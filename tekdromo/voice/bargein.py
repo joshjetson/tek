@@ -94,7 +94,17 @@ LOCK_CANCELS = 0.35
 
 # Sustained for this long. The single most important parameter in the file:
 # it is what separates a person from a cough, a door, or a codec artefact.
-HOLD_S = 0.30
+#
+# Raised from 0.30 after replies were being stopped by a keypress and worse.
+# Those are TRANSIENTS - a key is tens of milliseconds, a chair creak not much
+# more - while the shortest thing a person interrupts with is a word, and a
+# word is 300-500ms. 0.30 sat right on that boundary and a burst of typing
+# could hold the residual up long enough to clear it.
+#
+# The cost is being 150ms slower to stop, which is the right side of the trade:
+# a barge-in that arrives a beat late is barely noticeable, and one that fires
+# because somebody typed is the failure the whole feature was meant to remove.
+HOLD_S = 0.45
 
 # Never trigger in the first moments of a reply. The lag estimate does not
 # exist yet, and the speaker is still ramping - the two together make early

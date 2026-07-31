@@ -38,6 +38,8 @@ class MouthLink(object):
         self.running = True
         self.connected = False
         self.speaking = False
+        # Radio protocol: is the channel open. Drives the third eye.
+        self.channel_open = False
         # The expression to wear while this utterance is being said. Cleared
         # when speech ends so the face returns to whatever the display's own
         # state machine wants, rather than holding the last mood forever.
@@ -65,6 +67,8 @@ class MouthLink(object):
                         m = msg["mouth"]
                         self._mouth = (float(m[0]), float(m[1]))
                         self._at = time.time()
+                    if "channel" in msg:
+                        self.channel_open = bool(msg["channel"])
                     if "speaking" in msg:
                         self.speaking = bool(msg["speaking"])
                         if self.speaking:
@@ -78,6 +82,7 @@ class MouthLink(object):
                 self.connected = False
                 self.speaking = False
                 self.mood = None
+                self.channel_open = False
                 self._mouth = (0.0, 0.0)
                 if client is not None:
                     try:

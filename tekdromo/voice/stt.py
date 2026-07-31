@@ -178,6 +178,75 @@ def heard_wake(text):
     return any(w in t for w in WAKE_WORDS)
 
 
+# ---------------------------------------------------------------------------
+# Radio protocol.
+#
+# Every turn-taking heuristic in this project exists to GUESS where a turn
+# ended: VAD segmentation guessing you stopped talking, a follow-up window
+# guessing the next sentence was still meant for it, a level gate guessing you
+# were close enough to be addressing it, an acoustic detector guessing somebody
+# was talking over a reply. Each one is a probability dressed up as a decision,
+# and each one is wrong often enough to be noticed.
+#
+# "Over" removes the guess. It is not a heuristic, it is a statement, and radio
+# operators settled on it a century ago for exactly the reason it is needed
+# here: a half-duplex channel where both ends must agree whose turn it is and
+# neither can hear the other while transmitting.
+#
+#   "hey tek"        open the channel
+#   "...over"        my turn is finished, yours starts
+#   "copy that"      acknowledged, I am working on it
+#   "...over"        my turn is finished, yours starts
+#   "over and out"   channel closed
+#
+# The phrases are checked at the END of an utterance, because that is where a
+# sign-off goes, and "over" mid-sentence ("come over here", "think it over") is
+# ordinary English. OVER_OUT is tested FIRST since it contains OVER.
+OVER_OUT = ("over and out", "over out", "overandout")
+OVER = ("over", "go ahead", "your turn")
+
+# Tolerated mishearings. The small model is reliable on short words but not
+# perfect, and every one of these was chosen because it is not a word somebody
+# ends a sentence with by accident.
+OVER_FUZZ = ("ova", "overr", "oever")
+
+
+def _tail(text, n=4):
+    return " ".join((text or "").lower().replace(",", " ").split()[-n:])
+
+
+def ends_over_out(text):
+    """Did that utterance sign off for good?"""
+    t = _tail(text)
+    return any(t == p or t.endswith(" " + p) or t.endswith(p)
+               for p in OVER_OUT)
+
+
+def ends_over(text):
+    """Did that utterance hand the turn back? OVER_OUT is not OVER."""
+    if ends_over_out(text):
+        return False
+    words = (text or "").lower().replace(",", " ").replace(".", " ").split()
+    if not words:
+        return False
+    if words[-1] in OVER + OVER_FUZZ:
+        return True
+    return _tail(text, 2) in OVER
+
+
+def strip_over(text):
+    """The message without its sign-off - what actually gets answered."""
+    words = (text or "").replace(",", " ").split()
+    low = [w.lower().strip(".!?") for w in words]
+    for phrase in sorted(OVER_OUT + OVER, key=lambda p: -len(p.split())):
+        n = len(phrase.split())
+        if len(low) >= n and " ".join(low[-n:]) == phrase:
+            return " ".join(words[:-n]).strip()
+    if low and low[-1] in OVER_FUZZ:
+        return " ".join(words[:-1]).strip()
+    return " ".join(words).strip()
+
+
 # How close the first two words must look to a wake phrase to be treated as a
 # mangled one. The free decoder has 200k words to choose from, so it mishears
 # far more often than the grammar, which can only pick between four phrases and

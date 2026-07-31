@@ -106,6 +106,9 @@ def make_ears(wake_script, free_script):
     e.armed_until = 0.0
     e.followups = 0
     e._auto_armed = False
+    e.channel_open = False
+    e.channel_at = 0.0
+    e.parts = []
     e.utterances = e.wakes = e.commands = e.opens = 0
     e.last_heard = None
     e.misses = []
@@ -149,11 +152,16 @@ check("misses are bounded, not a leak", len(e.misses) <= 12, len(e.misses))
 # Wake word and command in one breath - how people actually talk.
 # "hey tek [unk]" is what the grammar really returns when a command follows -
 # the bare form means nothing came after it.
-e = make_ears(["hey tek [unk]"], ["hey tek what time is it"])
+# With the radio protocol this is HELD rather than dispatched: the sign-off
+# decides when a turn is over, and "hey tek what time is it" might be the
+# first half of "...in London, over". The cost is that a turn with no "over"
+# waits TURN_SILENCE_S; the benefit is that a turn WITH one is answered the
+# instant it ends, and neither is a guess.
+e = make_ears(["hey tek [unk]"], ["hey tek what time is it over"])
 e._utterance(DUMMY)
-check("wake + command in one breath is dispatched immediately",
+check("wake + command + OVER in one breath is dispatched immediately",
       len(e.service.events) == 1, e.service.events)
-check("the wake word is stripped from the command",
+check("the wake word AND the sign-off are stripped from the command",
       e.service.events[0].get("heard") == "what time is it",
       e.service.events[0].get("heard"))
 check("the event is a speech event",
@@ -162,16 +170,16 @@ check("the transcript reaches the brain's prompt text",
       "what time is it" in e.service.events[0].get("what", ""))
 
 # Wake word alone -> arm, then take the next utterance as the command.
-e = make_ears(["hey tek"], ["turn the lights off"])
+e = make_ears(["hey tek"], ["turn the lights off over"])
 e._utterance(DUMMY)
 check("wake word alone dispatches nothing yet", e.service.events == [])
 check("wake word alone arms it", time.monotonic() < e.armed_until)
 e._utterance(DUMMY)
-check("the next utterance becomes the command",
+check("the next utterance, signed off, becomes the command",
       len(e.service.events) == 1
       and e.service.events[0].get("heard") == "turn the lights off",
       e.service.events)
-check("it disarms after taking one command", e.armed_until == 0.0)
+check("the channel stays open for the next turn", e.channel_open is True)
 check("while armed it does not re-check the wake word",
       e.wake.calls == 1, e.wake.calls)
 
@@ -194,15 +202,14 @@ check("an empty follow-up does not dispatch an empty command",
 # left the real follow-up arriving to a closed door.
 check("a blank scrap does not consume the listening window",
       time.monotonic() < e.armed_until, e.armed_until - time.monotonic())
-e.free.script = ["and what about winter"]
+e.free.script = ["and what about winter over"]
 e._utterance(DUMMY)
 check("the real follow-up still lands after a blank one",
       [ev.get("heard") for ev in e.service.events] == ["and what about winter"],
       e.service.events)
-check("and THAT disarms it", e.armed_until == 0.0)
 
 # Counters, so `tek ears` reports something truthful.
-e = make_ears(["[unk]", "hey tek [unk]"], ["hey tek hello there"])
+e = make_ears(["[unk]", "hey tek [unk]"], ["hey tek hello there over"])
 e._utterance(DUMMY)
 e._utterance(DUMMY)
 check("counts every utterance, not just the ones that woke it",
@@ -220,7 +227,7 @@ e = make_ears(["hey tek"], ["SHOULD NOT BE CALLED"])
 e._utterance(DUMMY)
 check("a bare wake word arms without a free decode at all",
       e.free.calls == 0 and time.monotonic() < e.armed_until, e.free.calls)
-e = make_ears(["hey tek [unk]"], ["hey tek what time is it"])
+e = make_ears(["hey tek [unk]"], ["hey tek what time is it over"])
 e._utterance(DUMMY)
 check("a wake word WITH speech after it does decode",
       e.free.calls == 1 and e.service.events, (e.free.calls, e.service.events))
@@ -250,75 +257,98 @@ check("a source that ends ends the drain too", empty.read() is None)
 empty.close()
 
 
-# -- a follow-up must not need the wake word again -------------------------
-class _Gate(object):
-    def __init__(self, spoke_at):
-        self.spoke_at = spoke_at
+# -- radio protocol: over, and over and out --------------------------------
+# The whole point is that a turn boundary stops being a guess. Every other
+# mechanism here - VAD segmentation, the follow-up window, the level gate -
+# infers where a turn ended; "over" states it.
 
-
-e = make_ears(["[unk]"], ["yes please tell me more"])
-e._gate = _Gate(time.monotonic())          # it just finished speaking
-e._utterance(SPOKEN)
-check("straight after a reply, a follow-up needs no wake word",
-      [ev.get("heard") for ev in e.service.events] == ["yes please tell me more"],
+e = make_ears(["hey tek"], ["what is the weather over"])
+e._utterance(DUMMY)                        # wake word opens the channel
+check("the wake word opens the channel", e.channel_open is True)
+e._utterance(SPOKEN)                       # "...over" completes the turn
+check("an OVER completes the turn and dispatches it",
+      [ev.get("heard") for ev in e.service.events] == ["what is the weather"],
       e.service.events)
+check("the channel stays open after a turn", e.channel_open is True)
 
-# -- but the follow-up window must not become a conversation nobody started --
-# Observed live: one wake word at 21:48 produced nine "commands" over seven
-# minutes, none of them addressed to the device. Every reply refreshes
-# spoke_at, which re-arms the window, which takes the next thing said. From
-# the room it reads as "the mic is too sensitive"; the mic is fine.
-
-e = make_ears(["[unk]"] * 9, ["tell me more about that"] * 9)
-for _ in range(6):
-    e._gate = _Gate(time.monotonic())      # it replied again each time
-    e.armed_until = 0.0
-    e._utterance(SPOKEN)
-check("a follow-up chain is capped, not endless",
-      len(e.service.events) == ears.FOLLOWUP_MAX_TURNS,
-      "%d commands from %d attempts" % (len(e.service.events), 6))
-
-# An explicit wake word means "yes, I mean you" and restores the budget.
-e.wakes_before = len(e.service.events)
-e.followups = 0
-e._gate = _Gate(time.monotonic())
-e.armed_until = 0.0
-e._utterance(SPOKEN)
-check("saying the wake word again carries the conversation on",
-      len(e.service.events) == e.wakes_before + 1, e.service.events)
-
-# Audible but not addressed here: too quiet.
-e = make_ears(["[unk]"], ["tell me more about that"])
-e._gate = _Gate(time.monotonic())
-e._utterance(DUMMY)                        # silence: peak 0
-check("a quiet follow-up is refused, not answered", e.service.events == [],
-      e.service.events)
-
-# Audible and close, but not a sentence. "the", "i went what" and "right away
-# from me again" were all dispatched as questions.
-e = make_ears(["[unk]"], ["the"])
-e._gate = _Gate(time.monotonic())
-e._utterance(SPOKEN)
-check("a two-word fragment is refused, not answered", e.service.events == [],
-      e.service.events)
-
-# None of this applies after an explicit wake word - somebody who just said
-# the device's name has already proved they meant it, so neither the level bar
-# nor the word-count bar is applied. A bare wake word ARMS; the command is the
-# utterance after it.
-e = make_ears(["hey tek", "[unk]"], ["the"])
-e._utterance(DUMMY)                        # the wake word: arms
-e._utterance(DUMMY)                        # short AND silent, and still taken
-check("after a real wake word, a short quiet command still counts",
-      [ev.get("heard") for ev in e.service.events] == ["the"],
-      e.service.events)
-
-e = make_ears(["[unk]"], ["someone talking about something else"])
-e._gate = _Gate(time.monotonic() - (ears.FOLLOWUP_S + 5))
+# Several utterances become ONE turn: the person is still talking.
+e = make_ears(["hey tek"], ["so i was thinking", "about the boiler",
+                            "what should it be set to over"])
 e._utterance(DUMMY)
-check("but ordinary chatter long afterwards is still ignored",
-      e.service.events == [], e.service.events)
-check("the follow-up window is short", ears.FOLLOWUP_S <= 20.0, ears.FOLLOWUP_S)
+e._utterance(SPOKEN)
+check("mid-turn speech is HELD, not answered", e.service.events == [],
+      e.service.events)
+e._utterance(SPOKEN)
+check("still held", e.service.events == [], e.service.events)
+e._utterance(SPOKEN)
+check("the OVER joins the whole turn into one message",
+      [ev.get("heard") for ev in e.service.events]
+      == ["so i was thinking about the boiler what should it be set to"],
+      e.service.events)
+
+# "over and out" closes the channel.
+e = make_ears(["hey tek"], ["thanks that is all over and out"])
+e._utterance(DUMMY)
+e._utterance(SPOKEN)
+check("OVER AND OUT closes the channel", e.channel_open is False)
+check("...and still answers what was said",
+      [ev.get("heard") for ev in e.service.events] == ["thanks that is all"],
+      e.service.events)
+check("...and marks the turn as closing",
+      e.service.events and e.service.events[0].get("closing") is True,
+      e.service.events)
+
+# An open channel does NOT apply the level or word-count gates - the person
+# said they were talking to it, which is the question those gates guess at.
+e = make_ears(["hey tek"], ["yes over"])
+e._utterance(DUMMY)
+e._utterance(DUMMY)                        # silent AND two words
+check("an open channel takes quiet, short speech",
+      [ev.get("heard") for ev in e.service.events] == ["yes"],
+      e.service.events)
+
+# A missed "over" must not hold a turn forever.
+e = make_ears(["hey tek"] + ["[unk]"] * 12, ["mumble"] * 12)
+e._utterance(DUMMY)
+for _ in range(ears.CHANNEL_MAX_PARTS):
+    e._utterance(SPOKEN)
+check("a missed OVER answers anyway rather than holding forever",
+      len(e.service.events) == 1, e.service.events)
+
+
+# -- the follow-up window and its gates are GONE ---------------------------
+# They were heuristics for the question "is this still meant for me", and the
+# radio protocol answers it outright: the channel is open until somebody says
+# it is not. Keeping both would mean "over and out" closes the channel and a
+# heuristic immediately re-opens it, which is worse than either alone.
+
+check("an open channel replaces the follow-up budget",
+      hasattr(ears, "CHANNEL_IDLE_S") and hasattr(ears, "TURN_SILENCE_S"))
+
+# ...but the protocol must not be a TAX. Somebody who never learned it should
+# still be answered, so silence ends a turn too.
+e = make_ears(["hey tek"], ["what is the weather"])
+e._utterance(DUMMY)
+e._utterance(SPOKEN)
+check("without an OVER the turn is held", e.service.events == [],
+      e.service.events)
+e.channel_at = time.monotonic() - (ears.TURN_SILENCE_S + 1)
+e._send_turn()
+check("silence ends the turn anyway",
+      [ev.get("heard") for ev in e.service.events] == ["what is the weather"],
+      e.service.events)
+
+
+# Ordinary chatter with the channel CLOSED reaches nothing at all - no free
+# decode, no dispatch. That is the privacy posture as much as the noise one:
+# the wake grammar can only ever emit its own phrases or [unk], so a closed
+# channel cannot transcribe the household.
+e = make_ears(["[unk]"], ["someone talking about something else"])
+e._utterance(DUMMY)
+check("chatter with the channel closed is ignored entirely",
+      e.service.events == [] and e.channel_open is False, e.service.events)
+check("an open channel does not stay open all night",
+      ears.CHANNEL_IDLE_S <= 600.0, ears.CHANNEL_IDLE_S)
 
 
 # -- the free decoder mishearing the wake word -----------------------------
@@ -372,7 +402,7 @@ for phrase in ("what time is it", "hate technology in general",
 # greeting - "we tank" scores 0.57 and "hey there" 0.75 - so it is only ever
 # consulted when strip_wake removed nothing. Pin the routing, since that is
 # what makes the ambiguity harmless.
-e = make_ears(["hey tek [unk]"], ["hey tek hello there"])
+e = make_ears(["hey tek [unk]"], ["hey tek hello there over"])
 e._utterance(DUMMY)
 check("a stripped remainder is dispatched even if it looks wake-ish",
       [ev.get("heard") for ev in e.service.events] == ["hello there"],

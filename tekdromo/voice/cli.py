@@ -564,7 +564,8 @@ def main(argv=None):
             return 1
         r = c.request({"cmd": "status"})
         c.close()
-        for k in ("voice", "rate", "speaking", "spoken", "load_time"):
+        for k in ("voice", "rate", "speaking", "spoken", "load_time",
+                  "channel_open"):
             print("  %-10s %s" % (k, (r or {}).get(k)))
         return 0
 

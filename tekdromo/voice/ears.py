@@ -67,6 +67,32 @@ FOLLOWUP_S = 12.0
 # and short enough that a runaway costs three exchanges rather than an evening.
 FOLLOWUP_MAX_TURNS = 3
 
+# --- radio protocol --------------------------------------------------------
+# "hey tek" opens the channel, "over" hands the turn back, "over and out"
+# closes it. See the note in stt.py for why an explicit protocol beats every
+# heuristic it replaces.
+#
+# While the channel is OPEN there is no level gate, no word-count gate and no
+# follow-up budget: the person has said they are talking to it, so it listens
+# until they say they have stopped. All of that machinery exists to guess at
+# what this states outright.
+#
+# How long an open channel survives with nothing said. Long, because an open
+# channel is a deliberate act and closing it behind somebody's back is exactly
+# the "sometimes it hears us, sometimes it doesn't" this is meant to end - but
+# not unbounded, because a missed "out" must not leave the mic live all night.
+CHANNEL_IDLE_S = 180.0
+
+# Utterances collected into one turn before it is sent regardless. A missed
+# "over" should cost a slightly early answer, not a turn that never ends.
+CHANNEL_MAX_PARTS = 8
+
+# An implicit "over". Saying it is faster and certain, but REQUIRING it would
+# make the device worse for anyone who has not learned the protocol, and a
+# feature that only works if you know the magic word is one most of a household
+# does not have. So silence this long with a turn held ends it anyway.
+TURN_SILENCE_S = 3.5
+
 # A follow-up has to be SAID TO IT, not merely audible. Measured with
 # tools/wake_tune.py: deliberate speech at a normal distance peaks 0.49-0.75,
 # and the junk that got through this window peaked far below that. This is the
@@ -107,11 +133,27 @@ DEAF_S = 15.0
 # `pactl list`, not a recorder opened on every candidate.
 CACHE_S = 900.0
 
-# Capture gain asserted whenever the microphone is opened. 100% is 0 dB on
-# this card - full hardware gain, no software amplification - and measured
-# ambient at that setting peaks around 0.017 with no clipped frames at all,
-# so there is headroom to spare. The device was found at 63%.
-MIC_GAIN_PCT = 100
+# Capture gain asserted whenever the microphone is opened, overridable and
+# persisted as "mic_gain" in ~/.config/tekdromo/voice.json.
+#
+# It was 100%, set on the evidence that AMBIENT peaked around 0.017 with no
+# clipped frames - "headroom to spare". Ambient was the wrong thing to measure.
+# Speech is what has to fit, and tools/wake_tune.py measured real wake words at
+# this distance peaking 0.49-0.75, with the loudest at 0.747: just 2.5 dB below
+# full scale. Lean in, or say something with a plosive in it, and it clips -
+# and clipping damages recognition far more than being quiet does, because a
+# flattened waveform is not merely fainter, it is a different sound.
+#
+# 50% puts the same speech at about 0.37 peak, -8.6 dB, which is where a
+# capture chain wants to sit.
+#
+# What this does NOT fix, stated plainly because it is the intuitive
+# expectation: gain scales the voice and the room by the SAME factor, so
+# signal-to-noise is unchanged and distant speech will still transcribe as
+# mush. That is distance and reverb, not sensitivity. Nor does it quiet
+# barge-in, whose thresholds are all multiples of measured ambient and
+# therefore re-derive themselves at any gain.
+MIC_GAIN_PCT = 50
 
 
 # What a wake word that WORKS looks like at the microphone, measured with
@@ -367,6 +409,11 @@ class Ears(object):
         self.armed_until = 0.0
         # Consecutive commands taken WITHOUT a wake word. Reset by a real one.
         self.followups = 0
+        # Radio protocol: is the channel open, and what has been said into it
+        # since the last "over".
+        self.channel_open = False
+        self.channel_at = 0.0
+        self.parts = []
         self.utterances = 0
         self.wakes = 0
         self.commands = 0
@@ -388,6 +435,9 @@ class Ears(object):
         w = threading.Thread(target=self._watch)
         w.daemon = True
         w.start()
+        tw = threading.Thread(target=self._turn_watch)
+        tw.daemon = True
+        tw.start()
         return self
 
     def stop(self):
@@ -395,6 +445,14 @@ class Ears(object):
 
     def alive(self):
         return self._t is not None and self._t.is_alive()
+
+    def _gain_pct(self):
+        """Capture gain, from settings if somebody has tuned it."""
+        try:
+            from .service import load_settings
+            return int(load_settings().get("mic_gain", MIC_GAIN_PCT))
+        except Exception:
+            return MIC_GAIN_PCT
 
     def _build(self):
         """Recognisers and segmenter, built once, lazily.
@@ -442,16 +500,18 @@ class Ears(object):
                     print("ears: no working microphone; retrying", flush=True)
                     time.sleep(RETRY_S)
                     continue
-                # Assert the gain before opening. The C922 was sitting at
-                # 63% / -12 dB, which throws away a factor of four in
-                # amplitude before the recogniser sees anything - and wake
-                # spotting is measurably level-sensitive at the bottom end.
-                vio.set_source_volume(device, MIC_GAIN_PCT)
+                # Assert the gain before opening. The C922 was found at
+                # 63% / -12 dB, which throws away amplitude before the
+                # recogniser sees anything; it was then set to 100%, which
+                # left real speech 2.5 dB from clipping. See MIC_GAIN_PCT.
+                gain = self._gain_pct()
+                vio.set_source_volume(device, gain)
                 src = vio.MicSource(device)
                 self.device_in_use = device
                 self._src = src
                 self.opens += 1
                 self.listening_since = time.time()
+                print("ears: gain %d%%" % gain, flush=True)
                 print("ears: listening to %s (mic open #%d)"
                       % (device, self.opens), flush=True)
                 # Gate FIRST, then drain: the mute decision has to be made
@@ -483,6 +543,23 @@ class Ears(object):
                         pass
             if self._run:
                 time.sleep(RETRY_S)
+
+    def _turn_watch(self):
+        """Flush a held turn when the person simply stops talking.
+
+        Separate from _watch, which ticks every 20s - a turn boundary has to be
+        noticed in seconds or the implicit "over" is useless. Cheap enough to
+        run at 2Hz: it compares two floats.
+        """
+        while self._run:
+            time.sleep(0.5)
+            try:
+                if (self.channel_open and self.parts
+                        and time.monotonic() - self.channel_at > TURN_SILENCE_S):
+                    print("ears: silence - taking that as OVER", flush=True)
+                    self._send_turn()
+            except Exception:
+                pass
 
     def _watch(self):
         """Force a reconnect when the ear is listening to the wrong thing.
@@ -527,59 +604,42 @@ class Ears(object):
         self.utterances += 1
         secs = len(samples) / float(pcm.RATE)
 
-        # Just answered someone? Then the next thing said is almost certainly
-        # a reply, and demanding the wake word again before every single
-        # sentence is the main reason this did not feel like a conversation.
-        gate = self._gate
-        peak = float(np.abs(samples.astype(np.int32)).max()) / 32768.0
-        if (gate is not None and gate.spoke_at
-                and time.monotonic() - gate.spoke_at < FOLLOWUP_S
-                and time.monotonic() >= self.armed_until
-                and self.followups < FOLLOWUP_MAX_TURNS):
-            self.armed_until = time.monotonic() + self.window
-            self._auto_armed = True
-
-        if time.monotonic() < self.armed_until:
-            # Already woken: this is the command, whatever it is.
-            text = self.free.transcribe(samples)
-            # Saying the wake word twice is a normal thing to do when the
-            # first one seemed to go unheard. Dispatching the second one as
-            # the question gets an answer to "hey tek", which is nonsense.
-            auto = getattr(self, "_auto_armed", False)
-            words = len((text or "").split())
-            if text and not stt.wake_only(text) and auto and (
-                    peak < FOLLOWUP_MIN_PEAK or words < FOLLOWUP_MIN_WORDS):
-                # Audible, but not addressed here. Refused rather than
-                # answered, and logged with the numbers so the thresholds can
-                # be tuned from what a house actually does.
-                print("ears: not addressed %r (peak %.3f, %d words) - ignoring"
-                      % (text, peak, words), flush=True)
-                self.armed_until = 0.0
-                self._auto_armed = False
-                return
-            if text and not stt.wake_only(text):
-                self.armed_until = 0.0
-                if auto:
-                    self.followups += 1
-                    if self.followups >= FOLLOWUP_MAX_TURNS:
-                        print("ears: %d follow-ups without a wake word - "
-                              "say it again to carry on" % self.followups,
-                              flush=True)
-                self._auto_armed = False
-                self._command(text, secs,
-                              getattr(self.free, "last_conf", None),
-                              getattr(self.free, "last_min_conf", None))
+        # -- radio protocol: the channel is open -----------------------
+        # No level gate, no word count, no follow-up budget. The person opened
+        # the channel; everything until "over" is theirs. Those gates exist to
+        # guess whether speech was addressed here, and an open channel is the
+        # answer to that question, stated rather than inferred.
+        if self.channel_open:
+            if time.monotonic() - self.channel_at > CHANNEL_IDLE_S:
+                print("ears: channel idle - closing", flush=True)
+                self._close_channel()
             else:
-                # Do NOT disarm. The window belongs to the person, not to the
-                # first scrap of audio that happens to land in it - and after a
-                # reply the first thing segmented is often the tail of the
-                # room settling, which decodes to nothing. Spending the arm on
-                # that meant the actual follow-up arrived to a closed door,
-                # which is precisely "sometimes it hears us, sometimes it
-                # doesn't".
-                print("ears: armed, ignoring %r - still listening for %.0fs"
-                      % (text, self.armed_until - time.monotonic()), flush=True)
-            return
+                text = self.free.transcribe(samples)
+                self.channel_at = time.monotonic()
+                if not text:
+                    return
+                if stt.ends_over_out(text):
+                    msg = stt.strip_over(text)
+                    if msg:
+                        self.parts.append(msg)
+                    self._send_turn(secs, closing=True)
+                    return
+                if stt.ends_over(text):
+                    msg = stt.strip_over(text)
+                    if msg:
+                        self.parts.append(msg)
+                    self._send_turn(secs)
+                    return
+                # Mid-turn: hold it and wait for the sign-off.
+                self.parts.append(text)
+                print("ears: holding %r (%d part%s, waiting for OVER)"
+                      % (text, len(self.parts),
+                         "" if len(self.parts) == 1 else "s"), flush=True)
+                if len(self.parts) >= CHANNEL_MAX_PARTS:
+                    print("ears: %d parts without an OVER - answering anyway"
+                          % len(self.parts), flush=True)
+                    self._send_turn(secs)
+                return
 
         # The cheap pass. This grammar can only return the wake phrases or
         # "[unk]", so ordinary conversation cannot be transcribed by it.
@@ -613,6 +673,8 @@ class Ears(object):
         # by a cap that exists to stop an unattended one.
         self.followups = 0
         self._auto_armed = False
+        if not self.channel_open:
+            self._open_channel()
 
         # Was there anything AFTER the wake word? The grammar already knows:
         # it emits "hey tek" for the wake word alone and "hey tek [unk]" when
@@ -642,13 +704,62 @@ class Ears(object):
         # a greeting), so it must not be asked about strings where the answer
         # is already known.
         if rest and (rest != text.strip() or not stt.wake_only(rest)):
-            self._command(rest, secs)
+            # "hey tek what is the weather over" is ONE turn, not a wake word
+            # followed by a separate command. It goes into the same buffer as
+            # everything else so the sign-off decides when it is answered.
+            if stt.ends_over_out(rest):
+                self.parts.append(stt.strip_over(rest))
+                self._send_turn(secs, closing=True)
+            elif stt.ends_over(rest):
+                self.parts.append(stt.strip_over(rest))
+                self._send_turn(secs)
+            else:
+                self.parts.append(rest)
+                self.channel_at = time.monotonic()
+                print("ears: holding %r (waiting for OVER)" % rest, flush=True)
         else:
             self.armed_until = time.monotonic() + self.window
             print("ears: woken (%.1fs) - waiting %.0fs for a command"
                   % (secs, self.window), flush=True)
 
-    def _command(self, text, secs=0.0, conf=None, min_conf=None):
+    def _open_channel(self):
+        self.channel_open = True
+        self.channel_at = time.monotonic()
+        self.parts = []
+        self.armed_until = 0.0
+        print("ears: CHANNEL OPEN - say 'over' when you have finished",
+              flush=True)
+        try:
+            self.service.channel_open = True
+        except Exception:
+            pass
+
+    def _close_channel(self):
+        self.channel_open = False
+        self.parts = []
+        try:
+            self.service.channel_open = False
+        except Exception:
+            pass
+
+    def _send_turn(self, secs=0.0, closing=False):
+        """Hand the accumulated turn over, and hold the channel unless signed off."""
+        text = " ".join(p for p in self.parts if p).strip()
+        self.parts = []
+        self.channel_at = time.monotonic()
+        if closing:
+            self._close_channel()
+            print("ears: OVER AND OUT - channel closed", flush=True)
+        if not text:
+            if closing:
+                self.service.say("Out.", wait=False)
+            return
+        self._command(text, secs,
+                      getattr(self.free, "last_conf", None),
+                      getattr(self.free, "last_min_conf", None),
+                      closing=closing)
+
+    def _command(self, text, secs=0.0, conf=None, min_conf=None, closing=False):
         """Hand a heard command to the service's event pipeline."""
         self.commands += 1
         self.last_heard = text
@@ -658,6 +769,9 @@ class Ears(object):
                  "-" if min_conf is None else "%.2f" % min_conf), flush=True)
         ev = {"kind": "speech", "heard": text,
               "conf": conf, "min_conf": min_conf,
+              # Protocol turns get an immediate "copy that" and a closing
+              # "over", so the channel is audibly half-duplex.
+              "protocol": True, "closing": closing,
               "what": 'Someone spoke to you and said: "%s"' % text}
         # If the display has a recent frame, let the brain see who is talking.
         try:
@@ -688,4 +802,6 @@ class Ears(object):
                                 and self._gate.heard_ratio() else None),
                 "barges": self._gate.barges if self._gate is not None else 0,
                 "followups": self.followups,
+                "channel": "open" if self.channel_open else "closed",
+                "parts_held": len(self.parts),
                 "armed": time.monotonic() < self.armed_until}

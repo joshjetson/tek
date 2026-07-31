@@ -296,6 +296,9 @@ class VoiceService(object):
         # flight; the Gate reaches for it and finds None the rest of the time.
         # A two-turn spoken command in progress ("what name?"). See intents.py.
         self.pending_intent = None
+        # Radio protocol: is the channel open. Owned by the ear, mirrored here
+        # so the display can show it.
+        self._channel_open = False
         self.barge_enabled = True
         self.barge = None
         self.barges = 0
@@ -443,7 +446,8 @@ class VoiceService(object):
                   "barge_enabled": self.barge_enabled,
                   "rate": self.voice.rate, "speaking": self.speaking,
                   "spoken": self.spoken, "load_time": round(self.load_time, 2),
-                  "watching": self.watching, "listening": self.listening}
+                  "watching": self.watching, "listening": self.listening,
+                  "channel_open": self._channel_open}
             if self.ears is not None:
                 st["ears"] = self.ears.state()
             return st
@@ -560,6 +564,18 @@ class VoiceService(object):
             del self.turns[:-(agent.TURNS_KEPT * 2)]
         t0 = time.time()
 
+        # "Copy that" the moment a turn lands, BEFORE the model runs. On a
+        # half-duplex channel the acknowledgement is the protocol working:
+        # thinking time with no sound is indistinguishable from not having
+        # heard, and a lookup can be twenty seconds of exactly that. Said
+        # without waiting so it overlaps the model call rather than delaying
+        # the answer by its own length.
+        if ev.get("protocol") and not ev.get("closing"):
+            try:
+                self.say("Copy that.", wait=False)
+            except Exception:
+                pass
+
         # Commands TEK carries out itself never reach the brain. "Register my
         # face" is a thing to do, not a thing to have an opinion about, and
         # sending it costs ~7.5s and an API call to be told nothing useful.
@@ -606,9 +622,46 @@ class VoiceService(object):
               % (ev.get("kind"), words[:60], took), flush=True)
         self._journal(ev, words, True, took)
         try:
-            self._say(words)
+            self._say(self._sign_off(words, ev))
         except Exception:
             traceback.print_exc()
+
+    @property
+    def channel_open(self):
+        return self._channel_open
+
+    @channel_open.setter
+    def channel_open(self, v):
+        """Mirror the ear's channel state, and tell the display.
+
+        A property rather than a plain attribute so the ear can set it without
+        knowing the display exists - publishing on assignment keeps the two in
+        step by construction rather than by remembering.
+        """
+        v = bool(v)
+        if v != self._channel_open:
+            self._channel_open = v
+            try:
+                self.server.publish({"channel": v})
+            except Exception:
+                pass
+
+    def _sign_off(self, words, ev):
+        """Hand the turn back, out loud.
+
+        The person cannot see whether TEK has finished thinking or finished
+        speaking, and on a half-duplex channel that is the one thing both ends
+        must agree on. "Over" is how a hundred years of radio solved it.
+        """
+        if not ev.get("protocol"):
+            return words
+        tail = "Over and out." if ev.get("closing") else "Over."
+        w = (words or "").rstrip()
+        if not w:
+            return tail
+        if not w.endswith((".", "!", "?")):
+            w += "."
+        return "%s %s" % (w, tail)
 
     def interrupt(self, why="asked"):
         """Stop the current reply now. Safe to call when nothing is speaking.
@@ -683,6 +736,15 @@ class VoiceService(object):
         del self.recent[:-5]
         self._answered(words)
         self._journal(ev, words, True, time.time() - t0)
+        # The sign-off goes out as its own short utterance rather than being
+        # appended to the stream: by the time the answer has finished arriving
+        # the sink is already draining, and a separate "Over." costs one small
+        # gap - which is what a sign-off sounds like on radio anyway.
+        if ev.get("protocol"):
+            try:
+                self._say("Over and out." if ev.get("closing") else "Over.")
+            except Exception:
+                pass
         self.last_spoke = time.time()
         print("event speech: first word %.1fs, whole answer %.1fs, %d chars: %s"
               % (first["at"] or -1, time.time() - t0, len(words), words[:60]),
