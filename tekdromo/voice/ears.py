@@ -144,10 +144,19 @@ CACHE_S = 900.0
 # and clipping damages recognition far more than being quiet does, because a
 # flattened waveform is not merely fainter, it is a different sound.
 #
-# 75% puts the same speech at about 0.56 peak, -5.0 dB. Halving to 50% was the
-# first move and it is more than this needs: the problem is 2.5 dB of headroom,
-# not a level that is wildly wrong, and every dB taken off also takes a dB off
-# the distant speech that is already marginal.
+# PulseAudio's percentage is CUBIC, not linear, and that changes the whole
+# decision. Measured on this source:
+#
+#   100%  ->   0.00 dB   (1.00x amplitude)
+#    75%  ->  -7.50 dB   (0.42x)
+#    50%  -> -18.06 dB   (0.125x)
+#
+# So "halve it to 50%" would have been an EIGHT-fold amplitude cut, not a
+# halving - and every dB taken off the speaker also comes off the distant
+# speech that is already marginal enough to transcribe as mush. 75% is the
+# setting that actually does what halving was meant to do: it takes real
+# speech from a 0.747 peak to about 0.31, which is 10 dB of headroom instead
+# of 2.5, without gutting the far end of the room.
 #
 # What this does NOT fix, stated plainly because it is the intuitive
 # expectation: gain scales the voice and the room by the SAME factor, so
