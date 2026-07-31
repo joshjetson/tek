@@ -350,6 +350,16 @@ check("chatter with the channel closed is ignored entirely",
 check("an open channel does not stay open all night",
       ears.CHANNEL_IDLE_S <= 600.0, ears.CHANNEL_IDLE_S)
 
+# ...and the timeout must not depend on somebody making a noise. It used to
+# live in _utterance, so a silent room never reached it: one channel stayed
+# open 2h55m against a 180s setting, free-decoding the house the whole time.
+import inspect                                          # noqa: E402
+_src = inspect.getsource(ears.Ears._turn_watch)
+check("the idle timeout is on a TIMER, not on the audio path",
+      "CHANNEL_IDLE_S" in _src and "_close_channel" in _src)
+check("...and _utterance no longer owns it",
+      "CHANNEL_IDLE_S" not in inspect.getsource(ears.Ears._utterance))
+
 
 # -- the free decoder mishearing the wake word -----------------------------
 # Observed in the room: the grammar matched "hey tech" perfectly (it can only

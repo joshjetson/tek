@@ -565,10 +565,29 @@ class Ears(object):
         while self._run:
             time.sleep(0.5)
             try:
-                if (self.channel_open and self.parts
-                        and time.monotonic() - self.channel_at > TURN_SILENCE_S):
+                if not self.channel_open:
+                    continue
+                idle = time.monotonic() - self.channel_at
+                if self.parts and idle > TURN_SILENCE_S:
                     print("ears: silence - taking that as OVER", flush=True)
                     self._send_turn()
+                    continue
+                # Closing an idle channel belongs HERE, not in _utterance.
+                # It was in _utterance, which only runs when a sound arrives,
+                # so a quiet room never reached it: one channel opened at
+                # 22:57 and closed at 01:53, nearly three hours against a
+                # 180-second setting, and only then because some noise
+                # happened to land.
+                #
+                # That is a privacy bug rather than an untidiness. An open
+                # channel free-decodes every utterance, so the wake-word gate
+                # that is supposed to stop the household being transcribed was
+                # off for the whole of those three hours. A timeout that only
+                # fires when somebody speaks is not a timeout.
+                if not self.parts and idle > CHANNEL_IDLE_S:
+                    print("ears: channel idle %.0fs - closing" % idle,
+                          flush=True)
+                    self._close_channel()
             except Exception:
                 pass
 
@@ -621,36 +640,35 @@ class Ears(object):
         # guess whether speech was addressed here, and an open channel is the
         # answer to that question, stated rather than inferred.
         if self.channel_open:
-            if time.monotonic() - self.channel_at > CHANNEL_IDLE_S:
-                print("ears: channel idle - closing", flush=True)
-                self._close_channel()
-            else:
-                text = self.free.transcribe(samples)
-                self.channel_at = time.monotonic()
-                if not text:
-                    return
-                if stt.ends_over_out(text):
-                    msg = stt.strip_over(text)
-                    if msg:
-                        self.parts.append(msg)
-                    self._send_turn(secs, closing=True)
-                    return
-                if stt.ends_over(text):
-                    msg = stt.strip_over(text)
-                    if msg:
-                        self.parts.append(msg)
-                    self._send_turn(secs)
-                    return
-                # Mid-turn: hold it and wait for the sign-off.
-                self.parts.append(text)
-                print("ears: holding %r (%d part%s, waiting for OVER)"
-                      % (text, len(self.parts),
-                         "" if len(self.parts) == 1 else "s"), flush=True)
-                if len(self.parts) >= CHANNEL_MAX_PARTS:
-                    print("ears: %d parts without an OVER - answering anyway"
-                          % len(self.parts), flush=True)
-                    self._send_turn(secs)
+            # The idle timeout lives on _turn_watch's timer, not here - see
+            # the note there. A timeout that only fires when somebody speaks
+            # is not a timeout, and this is the branch that free-decodes.
+            text = self.free.transcribe(samples)
+            self.channel_at = time.monotonic()
+            if not text:
                 return
+            if stt.ends_over_out(text):
+                msg = stt.strip_over(text)
+                if msg:
+                    self.parts.append(msg)
+                self._send_turn(secs, closing=True)
+                return
+            if stt.ends_over(text):
+                msg = stt.strip_over(text)
+                if msg:
+                    self.parts.append(msg)
+                self._send_turn(secs)
+                return
+            # Mid-turn: hold it and wait for the sign-off.
+            self.parts.append(text)
+            print("ears: holding %r (%d part%s, waiting for OVER)"
+                  % (text, len(self.parts),
+                     "" if len(self.parts) == 1 else "s"), flush=True)
+            if len(self.parts) >= CHANNEL_MAX_PARTS:
+                print("ears: %d parts without an OVER - answering anyway"
+                      % len(self.parts), flush=True)
+                self._send_turn(secs)
+            return
 
         # The cheap pass. This grammar can only return the wake phrases or
         # "[unk]", so ordinary conversation cannot be transcribed by it.
