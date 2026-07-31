@@ -144,8 +144,10 @@ CACHE_S = 900.0
 # and clipping damages recognition far more than being quiet does, because a
 # flattened waveform is not merely fainter, it is a different sound.
 #
-# 50% puts the same speech at about 0.37 peak, -8.6 dB, which is where a
-# capture chain wants to sit.
+# 75% puts the same speech at about 0.56 peak, -5.0 dB. Halving to 50% was the
+# first move and it is more than this needs: the problem is 2.5 dB of headroom,
+# not a level that is wildly wrong, and every dB taken off also takes a dB off
+# the distant speech that is already marginal.
 #
 # What this does NOT fix, stated plainly because it is the intuitive
 # expectation: gain scales the voice and the room by the SAME factor, so
@@ -153,7 +155,7 @@ CACHE_S = 900.0
 # mush. That is distance and reverb, not sensitivity. Nor does it quiet
 # barge-in, whose thresholds are all multiples of measured ambient and
 # therefore re-derive themselves at any gain.
-MIC_GAIN_PCT = 50
+MIC_GAIN_PCT = 75
 
 
 # What a wake word that WORKS looks like at the microphone, measured with

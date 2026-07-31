@@ -25,10 +25,15 @@ import numpy as np
 # and slightly proud of the surface so it is never swallowed by a contour line
 # passing through the same place.
 # y was swept against the rendered head rather than guessed. 0.62 put the star
-# on the bridge of the nose and 1.10 pushed it over the crown; 0.95 read as too
-# high from the sofa, and below 0.86 it starts to touch the brow contour. 0.90
-# is the middle of the band that is clearly forehead and clearly not brow.
-POS = (0.0, 0.90, 0.46)
+# on the bridge of the nose and 1.10 pushed it over the crown. 0.95 and then
+# 0.90 both read as too high on the actual panel - which the render understates,
+# because a crop of the forehead makes it look better centred than it does from
+# across a room.
+#
+# 0.75 overlaps the top of the brow contour, and that is accepted rather than
+# avoided: the traditional third eye sits between and just above the eyebrows,
+# so touching the brow is closer to right than clearing it was.
+POS = (0.0, 0.75, 0.46)
 
 # Radius of the star, in the same units. Big enough to read across a room at
 # 1024x600, small enough not to compete with the face it sits on.
