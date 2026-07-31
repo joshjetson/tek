@@ -53,6 +53,31 @@ class MouthLink(object):
         t.start()
         return self
 
+    def _resync(self):
+        """Ask for state that is published only when it CHANGES.
+
+        Subscribing gets you every future message and nothing about the
+        present, so a display that connects after the channel opened never
+        learns it is open - and the third eye stays down through a whole
+        conversation. The star not appearing was exactly this: the service
+        said channel_open True and the display had simply never been told,
+        because the one publish happened while it was restarting.
+
+        A separate short-lived connection, because the subscribed one is a
+        stream and cannot carry a request. Failure is ignored: the worst case
+        is the state we already had.
+        """
+        try:
+            c = bus.Client(self.path, timeout=5.0)
+            st = c.request({"cmd": "status"}) or {}
+            c.close()
+            if "channel_open" in st:
+                self.channel_open = bool(st["channel_open"])
+            if "speaking" in st:
+                self.speaking = bool(st["speaking"])
+        except Exception:
+            pass
+
     def _loop(self):
         while self.running:
             client = None
@@ -60,6 +85,7 @@ class MouthLink(object):
                 client = bus.Client(self.path)
                 client.subscribe()
                 self.connected = True
+                self._resync()
                 for msg in client:
                     if not self.running:
                         break
