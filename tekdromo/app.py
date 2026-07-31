@@ -27,7 +27,7 @@ import cv2
 import numpy as np
 
 from . import (contour, framebuffer, geometry, hud, phosphor, rig, speech,
-               starfield, thirdeye, voice_link)
+               starfield, voice_link)
 from .voice import bus
 
 # How long a presence change must persist before it counts as an event. Below
@@ -222,6 +222,37 @@ class Display:
 
     MOOD_BLEND = MOOD_BLEND
     MOOD_RELAX = MOOD_RELAX
+
+    # How fast the star turns, in periods per second. A five-pointed star
+    # repeats every 72 degrees, so one "period" IS a fifth of a revolution and
+    # this is slower than it sounds.
+    EYE3_SPIN_HZ = 0.55
+    # How long it takes to rise out of the forehead and sink back. Fast enough
+    # to answer "did it hear me", slow enough not to pop.
+    EYE3_RISE_S = 0.35
+
+    def _apply_third_eye(self, t):
+        """Raise and spin the star while the channel is open.
+
+        It is a REGION of the face, not an overlay: the star is a bump in the
+        same height field the head is sliced from, so the contour lines bend
+        around it exactly as they bend around the nose. That is the difference
+        between belonging to the face and being drawn on top of it.
+
+        The spin control is quantised to twelve steps, so a full period is
+        twelve cached contour sets and the thirteenth frame is free.
+        """
+        want = 1.0 if self.mouth.channel_open else 0.0
+        cur = self.face.controls.get("eye3", 0.0)
+        if cur != want:
+            step = (1.0 / self.EYE3_RISE_S) * 0.033
+            cur = min(want, cur + step) if want > cur else max(want, cur - step)
+        if cur <= 0.0 and want <= 0.0:
+            if self.face.controls.get("eye3", 0.0) != 0.0:
+                self.face.set(eye3=0.0)
+            return
+        self.face.set(eye3=cur,
+                      eye3_spin=(t * self.EYE3_SPIN_HZ) % 1.0)
 
     def _apply_mood(self):
         """Wear the expression the reply asked for, while it is being said.
@@ -593,6 +624,7 @@ class Display:
                     else:
                         self.face.speak(0.0, 0.0)
                     self._apply_mood()
+                    self._apply_third_eye(t)
                 rx, ry = self.pose(t, dt)
                 v, e, n = self.face.update(t, dt)
                 pts = geometry.build_pts_culled(v, e, n, self.w, self.h,
@@ -610,17 +642,6 @@ class Display:
                     faint.append(self.clock.dim_points())
                 if self.scope is not None:
                     panels.append(self.scope.points())
-                # The third eye: spinning while the channel is open, so
-                # "it is your turn" is visible and not merely inferred from
-                # silence. Projected with the head's own transform so it turns
-                # with the face instead of floating in front of it.
-                if self.mouth.channel_open:
-                    try:
-                        panels.append(thirdeye.segments(
-                            t, self.w, self.h, (rx, ry, 0.0),
-                            self.a.dist, self.a.fov, geometry))
-                    except Exception:
-                        pass
                 if self.face_panel is not None:
                     # None when nobody is there, which the panel draws as a
                     # "no signal" cross rather than an empty box.

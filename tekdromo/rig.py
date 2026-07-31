@@ -65,6 +65,15 @@ CONTROLS = {
     "mouth_round": (-1.0, 1.0, 0.0, 5),   # -1 spread "ee" .. +1 pursed "oo"
     "smile":       (-1.0, 1.0, 0.0, 9),   # negative = frown
     "nose_flare":  (0.0, 1.0, 0.0, 3),
+    # The third eye: how far the star is raised out of the forehead, and where
+    # it has rotated to. See field_third_eye.
+    "eye3":        (0.0, 1.0, 0.0, 5),
+    # Spin phase, 0..1 across ONE period of a five-pointed star - which is 72
+    # degrees, not 360, because the star is its own rotation by symmetry.
+    # Twelve steps is 6 degrees apiece: fine enough to read as turning, coarse
+    # enough that the whole revolution is twelve cache entries rather than a
+    # new contour every frame.
+    "eye3_spin":   (0.0, 1.0, 0.0, 12),
 }
 
 DEFAULTS = {k: v[2] for k, v in CONTROLS.items()}
@@ -112,6 +121,47 @@ def field_brows(X, Y, c):
     # furrow also pinches the glabella into a vertical crease
     z = z - 0.055 * furrow * np.exp(-(X ** 2) / 0.0016 - ((Y - 0.36) ** 2) / 0.020)
     return z
+
+
+# Where the star sits and how big it is, in model coordinates - the same space
+# the rest of the face is defined in, which is the point of doing it this way.
+# amp and lobe were swept against the render, and both matter more than they
+# look. The head is sliced at 0.05 in z, so a bump of 0.075 crosses barely one
+# contour and the five points never resolve - it reads as a ripple on the
+# forehead, not a star. 0.26 crosses five or six, which is what makes the shape
+# legible as contour lines rather than as a smudge. lobe below about 0.5 rounds
+# the points off; above 0.7 they go spiky and the slices tangle.
+EYE3 = dict(cx=0.0, cy=0.72, r=0.11, amp=0.26, lobe=0.60)
+
+
+def field_third_eye(X, Y, c):
+    """A five-pointed star raised out of the forehead.
+
+    Drawn as a BUMP IN THE FIELD rather than as an outline over the top, which
+    is the whole reason it looks like it belongs. The head is an implicit
+    height field sliced into iso-contours, so anything added to the field gets
+    sliced by the same knife: the contour lines bend around the star exactly
+    the way they bend around the nose and the brow, for free. An outline drawn
+    afterwards is a decal, and reads as one - which is the same mistake an
+    earlier version of the whole face made, drawing feature curves onto an
+    undeformed mesh.
+
+    The star is a radially modulated gaussian. The radius at angle theta is
+    r(theta) = r * (1 + lobe*cos(5*(theta - phase))), so five points fall out of
+    the cosine rather than being constructed from line segments, and every
+    slice of it is smooth.
+    """
+    a = c["eye3"]
+    if a <= 0.0:
+        return np.zeros_like(X)
+    dx, dy = X - EYE3["cx"], Y - EYE3["cy"]
+    d2 = dx * dx + dy * dy
+    th = np.arctan2(dy, dx)
+    phase = c["eye3_spin"] * (2.0 * np.pi / 5.0)
+    r = EYE3["r"] * (1.0 + EYE3["lobe"] * np.cos(5.0 * (th - phase)))
+    # r can go small at the concave points; floor it so the exponent stays sane.
+    r = np.maximum(r, EYE3["r"] * 0.25)
+    return a * EYE3["amp"] * np.exp(-d2 / (r * r))
 
 
 def field_eyes(X, Y, c):
@@ -173,6 +223,10 @@ REGIONS = OrderedDict((
                    controls=("nose_flare",))),
     ("mouth", dict(box=(-0.46, 0.46, -0.60, -0.08), fn=field_mouth,
                    controls=("mouth_open", "mouth_round", "smile"))),
+    # Sits above the brows box (which ends at 0.60) and does not overlap it,
+    # so the two never re-contour each other's territory.
+    ("eye3",  dict(box=(-0.22, 0.22, 0.58, 0.88), fn=field_third_eye,
+                   controls=("eye3", "eye3_spin"))),
 ))
 
 
