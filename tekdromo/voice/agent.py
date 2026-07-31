@@ -31,6 +31,44 @@ BRAIN_CWD = os.path.expanduser("~/.cache/tekdromo/brain")
 
 SILENCE = "SILENCE"
 
+# Which tools the brain gets, BY EVENT KIND.
+#
+# It had "Read" and nothing else, so "what's the weather" was answered from
+# training data - confidently, and months out of date. That is not a personal
+# assistant, and the restriction was never about weather: it was about latency.
+# Withholding tools kept a judgement call from becoming an agent loop, after an
+# early version went agentic and turned a 10s decision into 59s of nothing.
+#
+# But the two cases are not the same. Deciding whether to greet somebody who
+# walked in needs the camera frame and nothing else, and every extra tool there
+# is pure latency in front of a person standing in a doorway. Answering a
+# QUESTION is the opposite: the whole value is being right, and being right
+# about the weather, the news or a football score requires looking.
+#
+# Measured on this box: a real weather lookup took 20.2s end to end, against
+# ~7.5s without. That is the price, it is only paid on questions, and it buys
+# an answer that is true.
+TOOLS = {
+    "speech": "Read WebSearch WebFetch",
+}
+TOOLS_DEFAULT = "Read"
+
+
+def tools_for(kind):
+    return TOOLS.get(kind, TOOLS_DEFAULT)
+
+
+# Markdown links, bare URLs and a trailing "Sources:" block. A web-enabled
+# model cites, and every one of those citations is READ ALOUD - the first live
+# lookup came back ending "Sources: [api.weather.gov KDAL latest observation]
+# (https://api.weather.gov/stations/KDAL/observations/latest)", which is
+# roughly twenty seconds of a face reading a URL to somebody in a kitchen.
+# The prompt asks for none of it; this is the guard for when it does anyway.
+_MD_LINK = re.compile(r"\[([^\]]+)\]\((?:https?://|www\.)[^)]+\)")
+_BARE_URL = re.compile(r"\b(?:https?://|www\.)\S+")
+_SOURCES = re.compile(r"\n*\s*(?:sources?|references?|citations?)\s*:.*\Z",
+                      re.IGNORECASE | re.DOTALL)
+
 # The expressions the brain may ask for. A strict subset of rig.EXPRESSIONS:
 # "asleep", "listening" and "speaking" are states the display owns and must not
 # be settable by something that is only deciding what to SAY. An unknown tag
@@ -145,6 +183,20 @@ Time: %(when)s. Faces detected: %(faces)d.
 Everything you write is read aloud exactly as written, so: no emoji, no
 formatting, no bullet points, no headings, no stage directions, and no
 describing the photo back.
+
+You can search the web when someone asks you a question. USE IT whenever the
+honest answer depends on something current - weather, news, prices, scores,
+opening times, anything that has changed since you were trained. Guessing at
+those from memory is worse than useless, because it sounds exactly as
+confident as knowing.
+
+Do not look things up that do not need it. Arithmetic, definitions, how
+something works, anything about this house - just answer. A lookup costs about
+twenty seconds of somebody standing there waiting.
+
+NEVER read out a URL, a source, a citation or a "Sources:" list. You are
+talking, not writing a report. If where you got it matters, say it the way a
+person would - "the forecast says", "according to the BBC" - and move on.
 
 Do NOT narrate what you are about to do. You have a tool for reading the
 camera frame; use it silently. "I'll look at what the camera sees first" was
@@ -415,7 +467,7 @@ class ClaudeBrain(Brain):
         # The CLI itself starts in 0.42 s, so the rest is session setup and the
         # model call - this is the floor without an API key.
         cmd = [self.exe, "-p", self.build_prompt(event),
-               "--allowed-tools", "Read",
+               "--allowed-tools", tools_for(event.get("kind")),
                "--no-session-persistence", "--disable-slash-commands"]
         cmd += ["--model", self.model or DEFAULT_BRAIN_MODEL]
         try:
@@ -464,7 +516,7 @@ class ClaudeBrain(Brain):
         possible to say it before knowing better.
         """
         cmd = [self.exe, "-p", self.build_prompt(event),
-               "--allowed-tools", "Read",
+               "--allowed-tools", tools_for(event.get("kind")),
                "--no-session-persistence", "--disable-slash-commands",
                "--model", self.model or DEFAULT_BRAIN_MODEL,
                "--output-format", "stream-json", "--verbose",
@@ -620,6 +672,14 @@ def parse(text, limit=REMARK_LIMIT):
     low = t.lower()
     if low.startswith(("i would stay", "i'll stay", "i will stay",
                        "nothing to say", "no comment")):
+        return None
+    # Strip citations before length, so a URL does not eat the budget a real
+    # answer needed.
+    t = _SOURCES.sub("", t)
+    t = _MD_LINK.sub(r"\1", t)          # keep the words, drop the link
+    t = _BARE_URL.sub("", t)
+    t = re.sub(r"[ \t]{2,}", " ", t).strip()
+    if not t:
         return None
     if len(t) > limit:
         cut = t[:limit].rsplit(".", 1)[0]

@@ -719,6 +719,34 @@ device's name has already proved they meant it.
 stream, so a reader just sits blocked forever. A watchdog closes the source to
 break it loose and the reader re-probes.
 
+### It can look things up
+
+The brain ran with `--allowed-tools Read` and nothing else, so "what's the
+weather" was answered from training data — confidently, and months stale. The
+restriction was never about weather: it was about latency, after an early
+version went agentic and turned a 10 s decision into 59 s of nothing.
+
+But the two cases are not the same. Deciding whether to greet someone who
+walked in needs the camera frame and nothing else, and every extra tool there
+is latency in front of a person standing in a doorway. Answering a **question**
+is the opposite — the whole value is being right. So tools are granted by event
+kind:
+
+| kind | tools |
+|---|---|
+| `speech` | `Read WebSearch WebFetch` |
+| everything else | `Read` |
+
+Measured end to end on this box: a live weather question was **17.4 s to first
+word, 39.5 s in full**, against ~7.5 s without a lookup. That is the price, it
+is paid only on questions, and it buys an answer that is true.
+
+**Citations are stripped.** A web-enabled model cites, and every citation gets
+read aloud — the first live lookup ended `Sources: [api.weather.gov KDAL
+latest observation](https://api.weather.gov/...)`, which is a face reading a
+URL to somebody in a kitchen. The prompt asks for none of it and `parse()`
+removes markdown links, bare URLs and trailing `Sources:` blocks anyway.
+
 ### The model, and why answers were thin
 
 Answers used to be one flat line because **the prompt asked for that** — "one
