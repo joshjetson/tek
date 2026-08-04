@@ -1018,7 +1018,12 @@ def main(argv=None):
                          "PulseAudio cannot see a Bluetooth speaker's own "
                          "buffer, so if the face still leads the sound, add it "
                          "here (e.g. 0.15).")
-    ap.add_argument("--no-ears", action="store_true",
+    # default=None, NOT False. With store_true's usual default the line below
+    # ran on every start and set listening=True unconditionally, overwriting
+    # the persisted setting - so `tek ears off` lasted exactly until the next
+    # restart. None means "not given on the command line", which is the only
+    # way argparse can distinguish that from an explicit false.
+    ap.add_argument("--no-ears", action="store_true", default=None,
                     help="do not listen. The microphone is never opened at "
                          "all, which is a stronger statement than a flag that "
                          "merely ignores what it hears.")
@@ -1043,7 +1048,10 @@ def main(argv=None):
         return 0
     svc = VoiceService(a.voice, a.device, a.socket, a.latency_trim,
                        a.brain_model, a.cooldown, a.keepalive)
-    svc.listening = not a.no_ears
+    # Only when the flag was actually passed. Otherwise the persisted value
+    # from ~/.config/tekdromo/voice.json stands.
+    if a.no_ears is not None:
+        svc.listening = not a.no_ears
     svc.mic = a.mic
     svc.run()
     return 0
