@@ -342,6 +342,24 @@ e = _channel_with(0.51, 0.26, "i thought level of or over")
 check("low-confidence noise is dropped, not answered",
       e.service.events == [] and e.parts == [], e.service.events)
 
+# ...and crucially it must not HOLD THE CHANNEL OPEN. The idle timer used to
+# be refreshed before the gate, so rejected noise kept the channel alive - and
+# in a room with background noise something arrives every few seconds forever.
+# The channel never closed and the wake word was never needed again.
+e = make_ears(["hey tek"], ["ignored"])
+e._utterance(DUMMY)
+stale = time.monotonic() - 999.0
+e.channel_at = stale
+e.free = _Conf(["mumble mumble over"], 0.51, 0.26)
+e._utterance(SPOKEN)
+check("rejected noise does NOT refresh the channel idle timer",
+      e.channel_at == stale, "timer moved: noise holds the channel open")
+
+# Real speech does refresh it, or a conversation would time out mid-sentence.
+e.free = _Conf(["what is the weather over"], 0.99, 0.86)
+e._utterance(SPOKEN)
+check("speech that passes the gate DOES refresh it", e.channel_at > stale)
+
 e = _channel_with(0.62, 0.22, "well i yeah over")
 check("a confident-sounding fragment with one unsure word is dropped",
       e.service.events == [] and e.parts == [], e.service.events)

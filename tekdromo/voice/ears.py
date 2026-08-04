@@ -669,7 +669,6 @@ class Ears(object):
             # the note there. A timeout that only fires when somebody speaks
             # is not a timeout, and this is the branch that free-decodes.
             text = self.free.transcribe(samples)
-            self.channel_at = time.monotonic()
             if not text:
                 return
             # An open channel drops the level and word-count gates, because the
@@ -685,6 +684,17 @@ class Ears(object):
                 print("ears: noise %r (conf %.2f/%.2f) - ignoring"
                       % (text, cf, cw if cw is not None else -1), flush=True)
                 return
+
+            # Refresh the idle timer ONLY for speech that passed the gate.
+            #
+            # It used to be refreshed on every utterance, before this check, so
+            # rejected noise still held the channel open - and in a room with
+            # background noise something arrives every few seconds forever. The
+            # channel never went idle, never closed, and the wake word was
+            # never needed again: reported as "Tek keeps talking even without
+            # me saying hey Tek". The confidence gate was working the whole
+            # time and was being undone by one line above it.
+            self.channel_at = time.monotonic()
             if stt.ends_over_out(text):
                 msg = stt.strip_over(text)
                 if msg:
