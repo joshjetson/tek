@@ -54,6 +54,35 @@ _NAME_ONLY = re.compile(
     r"^(?:(?:my name is|call me|i am|i'm|its|it's|this is|just)\s+)?"
     r"([a-z][a-z'\-]{1,15})\s*$", re.I)
 
+# --- sleep / wake ----------------------------------------------------------
+# "Ears off" cannot mean the microphone closes, because then nothing can hear
+# "ears on" and the only way back is a keyboard. It means SLEEP: the wake
+# grammar keeps running - it costs 0.11x real time and can only ever emit its
+# own phrases or [unk], so it still cannot transcribe the household - and
+# everything else is ignored until somebody says the wake word followed by a
+# resume phrase.
+#
+# `tek ears off` from a shell remains the hard version, which really does close
+# the microphone. Two different promises, and conflating them would make one of
+# them a lie.
+_SLEEP = re.compile(
+    r"\b(?:ears?\s+off|stop\s+listening|quit\s+listening|go\s+to\s+sleep|"
+    r"go\s+deaf|be\s+quiet|shut\s+up|leave\s+us\s+alone|"
+    r"stop\s+talking)\b", re.I)
+
+_RESUME = re.compile(
+    r"\b(?:ears?\s+on|start\s+listening|wake\s+up|are\s+you\s+awake|"
+    r"you\s+awake|listen\s+up|come\s+back)\b", re.I)
+
+
+def wants_sleep(text):
+    return bool(_SLEEP.search(text or ""))
+
+
+def wants_resume(text):
+    return bool(_RESUME.search(text or ""))
+
+
 _FORGET = re.compile(
     r"\b(forget|delete|remove|erase)\w*\b[^.?!]{0,24}?\b(my face|me|"
     r"([a-z][a-z'\-]{1,15})'s face)\b", re.I)
@@ -293,6 +322,16 @@ def handle(service, ev):
             return True
     elif pending:
         service.pending_intent = None          # expired
+
+    if wants_sleep(heard):
+        service.asleep = True
+        service._say("Ears off. Say hey tek, ears on, when you want me back.")
+        return True
+
+    if wants_resume(heard):
+        service.asleep = False
+        service._say("Ears on.")
+        return True
 
     if _FORGET.search(heard):
         from .. import recog

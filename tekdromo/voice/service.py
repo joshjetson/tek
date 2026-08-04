@@ -328,6 +328,11 @@ class VoiceService(object):
         # The ear, if there is a microphone. Separate switch from `watching`:
         # "stop watching me" and "stop listening to me" are different requests.
         self.listening = bool(cfg0.get("listening", True))
+        # Asleep: the microphone stays OPEN and the wake grammar keeps running,
+        # but nothing except "hey tek, ears on" is acted on. Distinct from
+        # listening=False, which closes the microphone and can only be undone
+        # from a shell. See intents._SLEEP.
+        self._asleep = bool(cfg0.get("asleep", False))
         self.ears = None
         self.mic = None               # PulseAudio source; None = the default
         self.cooldown = float(cooldown)
@@ -433,7 +438,7 @@ class VoiceService(object):
                     self.ears.stop()
                     self.ears = None
             st = {"ok": True, "listening": self.listening,
-                  "wake_words": None}
+                  "asleep": self._asleep, "wake_words": None}
             try:
                 from . import stt
                 st["wake_words"] = stt.WAKE_WORDS
@@ -450,7 +455,8 @@ class VoiceService(object):
                   "rate": self.voice.rate, "speaking": self.speaking,
                   "spoken": self.spoken, "load_time": round(self.load_time, 2),
                   "watching": self.watching, "listening": self.listening,
-                  "channel_open": self._channel_open}
+                  "channel_open": self._channel_open,
+                  "asleep": self._asleep}
             if self.ears is not None:
                 st["ears"] = self.ears.state()
             return st
@@ -647,6 +653,19 @@ class VoiceService(object):
             self._say(self._sign_off(words, ev))
         except Exception:
             traceback.print_exc()
+
+    @property
+    def asleep(self):
+        return self._asleep
+
+    @asleep.setter
+    def asleep(self, v):
+        v = bool(v)
+        if v != self._asleep:
+            self._asleep = v
+            save_settings({"asleep": v})
+            print("ears: %s" % ("ASLEEP - only 'hey tek ears on' will wake me"
+                                if v else "AWAKE"), flush=True)
 
     @property
     def channel_open(self):

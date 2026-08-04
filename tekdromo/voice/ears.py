@@ -659,6 +659,26 @@ class Ears(object):
         self.utterances += 1
         secs = len(samples) / float(pcm.RATE)
 
+        # -- asleep: hear the wake word and nothing else ----------------
+        # The microphone stays open and the WAKE GRAMMAR still runs, which is
+        # what makes "hey tek, ears on" possible at all - a mute that can only
+        # be undone from a keyboard is a trap. The grammar can emit only its
+        # own phrases or [unk], so this state still cannot transcribe the
+        # household; the free decoder runs solely to check whether the words
+        # after the wake word were a resume phrase.
+        if getattr(self.service, "asleep", False):
+            spotted = self.wake.transcribe(samples)
+            if not stt.heard_wake(spotted):
+                return
+            text = self.free.transcribe(samples)
+            rest = stt.strip_wake(text) or text
+            if self._control(rest):
+                self._close_channel()
+            else:
+                print("ears: asleep, ignoring %r - say 'hey tek ears on'"
+                      % rest, flush=True)
+            return
+
         # -- radio protocol: the channel is open -----------------------
         # No level gate, no word count, no follow-up budget. The person opened
         # the channel; everything until "over" is theirs. Those gates exist to
@@ -670,6 +690,8 @@ class Ears(object):
             # is not a timeout, and this is the branch that free-decodes.
             text = self.free.transcribe(samples)
             if not text:
+                return
+            if self._control(text):
                 return
             # An open channel drops the level and word-count gates, because the
             # person said they were talking to it. It must NOT drop this one:
@@ -788,6 +810,8 @@ class Ears(object):
         # cannot separate "we tank" (0.57, a wake word) from "hey there" (0.75,
         # a greeting), so it must not be asked about strings where the answer
         # is already known.
+        if self._control(rest or text):
+            return
         if rest and (rest != text.strip() or not stt.wake_only(rest)):
             # "hey tek what is the weather over" is ONE turn, not a wake word
             # followed by a separate command. It goes into the same buffer as
@@ -806,6 +830,42 @@ class Ears(object):
             self.armed_until = time.monotonic() + self.window
             print("ears: woken (%.1fs) - waiting %.0fs for a command"
                   % (secs, self.window), flush=True)
+
+    def _control(self, text):
+        """Sleep and wake, acted on immediately. True if it was handled.
+
+        These do NOT wait for "over". Everything else is a message to be
+        answered and the sign-off decides when the turn ends, but "ears off"
+        is an instruction to the EAR - making somebody complete a protocol
+        exchange to stop it listening is exactly backwards, and at a dinner
+        table they want it quiet now, not after a turn boundary.
+
+        Handled here rather than in intents.handle() for the same reason: that
+        runs in the voice service after a turn has been dispatched, and this
+        has to work before one has.
+        """
+        if not text:
+            return False
+        from . import intents as _intents
+        if _intents.wants_sleep(text):
+            self.parts = []
+            self._close_channel()
+            self.service.asleep = True
+            try:
+                self.service.say(
+                    "Ears off. Say hey tek, ears on, when you want me back.",
+                    wait=False)
+            except Exception:
+                pass
+            return True
+        if _intents.wants_resume(text):
+            self.service.asleep = False
+            try:
+                self.service.say("Ears on.", wait=False)
+            except Exception:
+                pass
+            return True
+        return False
 
     def _open_channel(self):
         self.channel_open = True

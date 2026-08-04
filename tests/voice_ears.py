@@ -118,6 +118,7 @@ def make_ears(wake_script, free_script):
     e.channel_open = False
     e.channel_at = 0.0
     e.parts = []
+    e.service.asleep = False
     e.utterances = e.wakes = e.commands = e.opens = 0
     e.last_heard = None
     e.misses = []
@@ -323,6 +324,39 @@ for _ in range(ears.CHANNEL_MAX_PARTS):
     e._utterance(SPOKEN)
 check("a missed OVER answers anyway rather than holding forever",
       len(e.service.events) == 1, e.service.events)
+
+
+# -- "hey tek ears off" / "hey tek ears on" --------------------------------
+# Asleep is NOT the microphone closing. If it were, nothing could hear "ears
+# on" and the only way back would be a keyboard - a mute you cannot undo by
+# voice is a trap. The wake grammar keeps running, which can only emit its own
+# phrases or [unk], so the household still cannot be transcribed.
+
+e = make_ears(["hey tek [unk]"], ["hey tek ears off"])
+e._utterance(DUMMY)
+check("'ears off' puts it to sleep", e.service.asleep is True)
+check("...and does not dispatch it as a question", e.service.events == [],
+      e.service.events)
+
+# Asleep: ordinary speech reaches nothing, even with a wake word in front.
+e.wake.script = ["hey tek [unk]"]
+e.free.script = ["hey tek what is the weather"]
+e._utterance(SPOKEN)
+check("asleep, even a wake word plus a question is ignored",
+      e.service.events == [] and e.service.asleep is True, e.service.events)
+
+# ...and without a wake word it does not even free-decode.
+e.wake.script = ["[unk]"]
+before = e.free.calls
+e._utterance(SPOKEN)
+check("asleep and unwoken, nothing is transcribed at all",
+      e.free.calls == before, "free decoder ran while asleep")
+
+# The one thing that gets through.
+e.wake.script = ["hey tek [unk]"]
+e.free.script = ["hey tek ears on"]
+e._utterance(SPOKEN)
+check("'ears on' wakes it", e.service.asleep is False)
 
 
 # -- noise must not become a question --------------------------------------
