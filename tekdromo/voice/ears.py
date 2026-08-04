@@ -595,7 +595,7 @@ class Ears(object):
                 idle = time.monotonic() - self.channel_at
                 if self.parts and idle > TURN_SILENCE_S:
                     print("ears: silence - taking that as OVER", flush=True)
-                    self._send_turn()
+                    self._send_turn(by_silence=True)
                     continue
                 # Closing an idle channel belongs HERE, not in _utterance.
                 # It was in _utterance, which only runs when a sound arrives,
@@ -679,8 +679,16 @@ class Ears(object):
             # the replies queued up minutes deep.
             cf = getattr(self.free, "last_conf", None)
             cw = getattr(self.free, "last_min_conf", None)
-            if cf is not None and (cf < CONF_MEAN_MIN or
-                                   (cw is not None and cw < CONF_WORD_MIN)):
+            # Fail CLOSED when there is no measurement. It used to read
+            # `cf is not None and ...`, so an unavailable confidence skipped the
+            # gate and everything passed - the filter was silently off for any
+            # utterance that produced no word scores, which the log shows as
+            # "conf -/-". A gate that opens when it cannot see is not a gate.
+            if cf is None:
+                print("ears: no confidence for %r - ignoring" % text,
+                      flush=True)
+                return
+            if cf < CONF_MEAN_MIN or (cw is not None and cw < CONF_WORD_MIN):
                 print("ears: noise %r (conf %.2f/%.2f) - ignoring"
                       % (text, cf, cw if cw is not None else -1), flush=True)
                 return
@@ -819,14 +827,36 @@ class Ears(object):
         except Exception:
             pass
 
-    def _send_turn(self, secs=0.0, closing=False):
-        """Hand the accumulated turn over, and hold the channel unless signed off."""
+    def _send_turn(self, secs=0.0, closing=False, by_silence=False):
+        """Hand the accumulated turn over, and hold the channel unless signed off.
+
+        A turn ended by SILENCE closes the channel; a turn ended by an explicit
+        "over" keeps it open. That asymmetry is the whole point.
+
+        "Over" is somebody saying "my turn ended, yours starts, I am still
+        here". Silence says nothing of the kind - it is the fallback for people
+        who have not learned the protocol, and it cannot distinguish "finished
+        my question" from "was never talking to you".
+
+        At a dinner table that difference is everything. One false wake used to
+        open a channel, and then every natural pause in the family's
+        conversation became a turn, an answer, and a fresh 3.5s window for the
+        next one. Reported as "Tek is out of control, we are eating dinner and
+        he is just randomly talking". Now a silent ending buys exactly one
+        reply and shuts the channel; carrying on requires either "over" or the
+        wake word again, both of which are deliberate acts.
+        """
         text = " ".join(p for p in self.parts if p).strip()
         self.parts = []
         self.channel_at = time.monotonic()
         if closing:
             self._close_channel()
             print("ears: OVER AND OUT - channel closed", flush=True)
+        elif by_silence:
+            self._close_channel()
+            print("ears: turn ended by silence, not by OVER - closing the "
+                  "channel; say 'hey tek' or end with 'over' to carry on",
+                  flush=True)
         if not text:
             if closing:
                 self.service.say("Out.", wait=False)

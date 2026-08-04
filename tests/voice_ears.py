@@ -88,11 +88,20 @@ check("the gate ends when the source ends",
 
 # -- the wake/command decision ---------------------------------------------
 class FakeRec(object):
-    """Stands in for a Recogniser. Returns whatever it was told to."""
+    """Stands in for a Recogniser. Returns whatever it was told to.
 
-    def __init__(self, script):
+    Carries a confidence, because the real one does and the gate fails CLOSED
+    without it. A double that omits an attribute the contract depends on does
+    not test a weaker version of the system, it tests a different one - these
+    all started dropping the moment the gate stopped treating "no measurement"
+    as a pass, which is the double being wrong rather than the code.
+    """
+
+    def __init__(self, script, conf=0.95, minconf=0.85):
         self.script = list(script)
         self.calls = 0
+        self.last_conf = conf
+        self.last_min_conf = minconf
 
     def transcribe(self, samples):
         self.calls += 1
@@ -326,8 +335,7 @@ check("a missed OVER answers anyway rather than holding forever",
 
 class _Conf(FakeRec):
     def __init__(self, script, conf, minconf):
-        FakeRec.__init__(self, script)
-        self.last_conf, self.last_min_conf = conf, minconf
+        FakeRec.__init__(self, script, conf, minconf)
 
 
 def _channel_with(conf, minconf, text):
@@ -364,6 +372,14 @@ e = _channel_with(0.62, 0.22, "well i yeah over")
 check("a confident-sounding fragment with one unsure word is dropped",
       e.service.events == [] and e.parts == [], e.service.events)
 
+# No measurement means no pass. The gate used to read "cf is not None and
+# ...", so an unavailable confidence skipped it entirely and everything got
+# through - the log shows those as "conf -/-". A gate that opens when it
+# cannot see is not a gate.
+e = _channel_with(None, None, "i know you know and my and players that like over")
+check("an unmeasurable utterance is dropped, not passed",
+      e.service.events == [], e.service.events)
+
 e = _channel_with(0.99, 0.86, "what is the weather over")
 check("real speech still gets through",
       [ev.get("heard") for ev in e.service.events] == ["what is the weather"],
@@ -372,6 +388,33 @@ check("real speech still gets through",
 e = _channel_with(0.72, 0.72, "why over")
 check("a short but confident question gets through",
       [ev.get("heard") for ev in e.service.events] == ["why"], e.service.events)
+
+
+# -- a turn ended by SILENCE closes the channel ----------------------------
+# "Over" says "my turn ended, yours starts, I am still here". Silence says
+# nothing of the kind - it is the fallback for people who have not learned the
+# protocol, and cannot tell "finished my question" from "was never talking to
+# you". At a dinner table one false wake opened a channel and then every pause
+# in the family's conversation became a turn, an answer, and a fresh window.
+
+e = make_ears(["hey tek"], ["ignored"])
+e._utterance(DUMMY)
+e.free = _Conf(["what is the weather"], 0.99, 0.86)   # NO "over"
+e._utterance(SPOKEN)
+e.channel_at = time.monotonic() - (ears.TURN_SILENCE_S + 1)
+e._send_turn(by_silence=True)
+check("a silent ending still answers", len(e.service.events) == 1,
+      e.service.events)
+check("...but CLOSES the channel", e.channel_open is False)
+
+e = make_ears(["hey tek"], ["ignored"])
+e._utterance(DUMMY)
+e.free = _Conf(["what is the weather over"], 0.99, 0.86)
+e._utterance(SPOKEN)
+check("an explicit OVER answers too", len(e.service.events) == 1,
+      e.service.events)
+check("...and KEEPS the channel open, which is the whole asymmetry",
+      e.channel_open is True)
 
 
 # -- the follow-up window and its gates are GONE ---------------------------
