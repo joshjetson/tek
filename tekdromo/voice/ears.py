@@ -93,6 +93,31 @@ CHANNEL_MAX_PARTS = 8
 # does not have. So silence this long with a turn held ends it anyway.
 TURN_SILENCE_S = 3.5
 
+# Vosk's own confidence, used to throw noise away before it becomes a question.
+#
+# Measured downstairs in a room with real background noise, which is where the
+# numbers finally separated:
+#
+#   "there's a lot of background noise so just don't say anything for a while"
+#                                     mean 0.99  min 0.86   <- a person
+#   "cool"                            mean 0.84  min 0.84   <- a person
+#   "why"                             mean 0.72  min 0.72   <- a person
+#   "i thought level of or"           mean 0.51  min 0.26   <- noise
+#   "well i yeah"                     mean 0.62  min 0.22   <- noise
+#
+# The MIN matters more than the mean and is the reason this works at all. A
+# small model must emit real words for every sound it segments, so noise comes
+# back as fluent, plausible English - but it comes back with one or two words
+# it is quietly unsure of, and a genuine sentence does not. 0.86 against 0.26
+# is not a close call.
+#
+# Deliberately not thresholded until there was data. Synthetic degradation
+# never reproduced this: quiet alone still transcribes perfectly and
+# quiet-plus-noise returns nothing, so only a real noisy room shows the middle
+# case this exists for.
+CONF_MEAN_MIN = 0.65
+CONF_WORD_MIN = 0.40
+
 # A follow-up has to be SAID TO IT, not merely audible. Measured with
 # tools/wake_tune.py: deliberate speech at a normal distance peaks 0.49-0.75,
 # and the junk that got through this window peaked far below that. This is the
@@ -646,6 +671,19 @@ class Ears(object):
             text = self.free.transcribe(samples)
             self.channel_at = time.monotonic()
             if not text:
+                return
+            # An open channel drops the level and word-count gates, because the
+            # person said they were talking to it. It must NOT drop this one:
+            # confidence is not asking "were you addressing me", it is asking
+            # "were those even words". In a noisy room every fragment of
+            # background became a turn, then a model call, then a reply, and
+            # the replies queued up minutes deep.
+            cf = getattr(self.free, "last_conf", None)
+            cw = getattr(self.free, "last_min_conf", None)
+            if cf is not None and (cf < CONF_MEAN_MIN or
+                                   (cw is not None and cw < CONF_WORD_MIN)):
+                print("ears: noise %r (conf %.2f/%.2f) - ignoring"
+                      % (text, cf, cw if cw is not None else -1), flush=True)
                 return
             if stt.ends_over_out(text):
                 msg = stt.strip_over(text)

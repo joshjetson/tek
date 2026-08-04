@@ -316,6 +316,46 @@ check("a missed OVER answers anyway rather than holding forever",
       len(e.service.events) == 1, e.service.events)
 
 
+# -- noise must not become a question --------------------------------------
+# An open channel drops the level and word-count gates, because the person
+# said they were talking to it. It must NOT drop the confidence gate: that is
+# not asking "were you addressing me", it is asking "were those even words".
+# Measured downstairs in a noisy room - a person scores mean 0.72-0.99 with a
+# minimum of 0.72-0.86, while noise scores 0.51-0.62 with a minimum of
+# 0.22-0.26. The MIN is what separates them.
+
+class _Conf(FakeRec):
+    def __init__(self, script, conf, minconf):
+        FakeRec.__init__(self, script)
+        self.last_conf, self.last_min_conf = conf, minconf
+
+
+def _channel_with(conf, minconf, text):
+    e = make_ears(["hey tek"], ["ignored"])
+    e._utterance(DUMMY)                      # open the channel
+    e.free = _Conf([text], conf, minconf)
+    e._utterance(SPOKEN)
+    return e
+
+
+e = _channel_with(0.51, 0.26, "i thought level of or over")
+check("low-confidence noise is dropped, not answered",
+      e.service.events == [] and e.parts == [], e.service.events)
+
+e = _channel_with(0.62, 0.22, "well i yeah over")
+check("a confident-sounding fragment with one unsure word is dropped",
+      e.service.events == [] and e.parts == [], e.service.events)
+
+e = _channel_with(0.99, 0.86, "what is the weather over")
+check("real speech still gets through",
+      [ev.get("heard") for ev in e.service.events] == ["what is the weather"],
+      e.service.events)
+
+e = _channel_with(0.72, 0.72, "why over")
+check("a short but confident question gets through",
+      [ev.get("heard") for ev in e.service.events] == ["why"], e.service.events)
+
+
 # -- the follow-up window and its gates are GONE ---------------------------
 # They were heuristics for the question "is this still meant for me", and the
 # radio protocol answers it outright: the channel is open until somebody says

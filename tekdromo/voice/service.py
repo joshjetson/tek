@@ -299,6 +299,9 @@ class VoiceService(object):
         # Radio protocol: is the channel open. Owned by the ear, mirrored here
         # so the display can show it.
         self._channel_open = False
+        # Which spoken turn is current. A newer one supersedes an older one
+        # that has not been said yet - see _consider.
+        self.turn_seq = 0
         self.barge_enabled = True
         self.barge = None
         self.barges = 0
@@ -564,6 +567,20 @@ class VoiceService(object):
             del self.turns[:-(agent.TURNS_KEPT * 2)]
         t0 = time.time()
 
+        # Claim this turn. Deciding costs 8-30s and speaking costs as long as
+        # the answer, and both happen behind one lock, so in a noisy room the
+        # replies stack up: observed at first-word latencies of 23s, 58s, 98s
+        # and 117s, with whole answers running past three minutes. From the
+        # room that is a device talking continuously about things nobody asked
+        # about any more.
+        #
+        # An answer to a question somebody asked two minutes ago is worse than
+        # no answer, so a newer turn supersedes an older one. Checked again
+        # after the model returns, because that is where the time goes.
+        if ev.get("kind") == "speech":
+            self.turn_seq += 1
+        seq = self.turn_seq
+
         # "Copy that" the moment a turn lands, BEFORE the model runs. On a
         # half-duplex channel the acknowledgement is the protocol working:
         # thinking time with no sound is indistinguishable from not having
@@ -595,7 +612,7 @@ class VoiceService(object):
         # so streaming would save nothing and only add ways to go wrong.
         if ev.get("kind") == "speech" and hasattr(self.brain, "stream"):
             try:
-                if self._stream_reply(ev, t0):
+                if self._stream_reply(ev, t0, seq):
                     return
             except Exception:
                 traceback.print_exc()
@@ -606,6 +623,11 @@ class VoiceService(object):
         except Exception:
             traceback.print_exc()
             words = None
+        if ev.get("kind") == "speech" and seq != self.turn_seq:
+            print("event speech: superseded by a newer turn - dropping %r"
+                  % ((words or "")[:40],), flush=True)
+            self._journal(ev, None, False, time.time() - t0)
+            return
         took = time.time() - t0
         if not words:
             print("event %s: stayed quiet (%.1fs)" % (ev.get("kind"), took),
@@ -709,7 +731,7 @@ class VoiceService(object):
                 return
         self.turns.append({"heard": None, "said": words, "at": time.time()})
 
-    def _stream_reply(self, ev, t0):
+    def _stream_reply(self, ev, t0, seq=None):
         """Speak a reply as the model writes it. True if anything was said.
 
         The first chunk is what the whole exercise is for, so it is timed and
@@ -724,6 +746,11 @@ class VoiceService(object):
                     first["at"] = time.time() - t0
                 yield piece
 
+        # Superseded before a word came out? Then it is stale by definition.
+        if seq is not None and seq != self.turn_seq:
+            print("event speech: superseded before speaking - dropping",
+                  flush=True)
+            return False
         r = self._say(timed()) or {}
         words = (r.get("text") or "").strip()
         if not words:
