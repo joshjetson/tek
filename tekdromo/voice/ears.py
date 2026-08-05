@@ -189,7 +189,25 @@ CACHE_S = 900.0
 # mush. That is distance and reverb, not sensitivity. Nor does it quiet
 # barge-in, whose thresholds are all multiples of measured ambient and
 # therefore re-derive themselves at any gain.
-MIC_GAIN_PCT = 75
+# BACK TO 100, because 75 broke the wake word outright.
+#
+# 75% is -7.50 dB, which is 0.42x amplitude, and PulseAudio's percentage being
+# cubic is what makes that so much bigger a cut than it reads. The six wake
+# words tools/wake_tune.py measured firing 6/6 peaked 0.49-0.75 at 100%; the
+# same speech at 75% lands at 0.21-0.32, every one of them below the 0.45 that
+# works. Result: 7807 utterances, zero wakes, and "hey tek ears on does
+# nothing".
+#
+# The clipping this was meant to fix is real - a peak of exactly 1.000 has been
+# logged - but it is rare and costs one garbled utterance, while being unable
+# to wake the device costs all of them. Headroom is worth having only once the
+# thing can be woken.
+#
+# The right fix is not a gain compromise; it is getting more signal, which
+# means a closer or better microphone. Turning the gain down to protect against
+# clipping, on a mic that is already marginal at a normal speaking distance,
+# was solving the wrong end of the problem.
+MIC_GAIN_PCT = 100
 
 
 # What a wake word that WORKS looks like at the microphone, measured with
@@ -669,7 +687,22 @@ class Ears(object):
         if getattr(self.service, "asleep", False):
             spotted = self.wake.transcribe(samples)
             if not stt.heard_wake(spotted):
+                # Log the near miss HERE too. The first version returned
+                # silently, so "hey tek ears on does nothing" produced 7807
+                # utterances, zero wakes, and not one line explaining why -
+                # the exact silent failure this project keeps paying for. The
+                # counters said the ear was working and the log said nothing
+                # at all.
+                peak = float(np.abs(samples.astype(np.int32)).max()) / 32768.0
+                self.misses.append({"secs": round(secs, 2),
+                                    "peak": round(peak, 4), "got": spotted})
+                del self.misses[:-12]
+                if spotted and spotted != "[unk]":
+                    print("ears: ASLEEP near miss %r (%.1fs, peak %.3f)%s"
+                          % (spotted, secs, peak, _level_hint(peak)),
+                          flush=True)
                 return
+            print("ears: asleep, woken by %r" % spotted, flush=True)
             text = self.free.transcribe(samples)
             rest = stt.strip_wake(text) or text
             if self._control(rest):
