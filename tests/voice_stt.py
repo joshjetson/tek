@@ -187,7 +187,10 @@ gap = pcm.silence(int(pcm.RATE * 1.2))
 a, b = speak("turn on the light"), speak("what time is it")
 stream = np.concatenate([pcm.silence(pcm.RATE // 2), a, gap, b,
                          pcm.silence(pcm.RATE // 2)])
-segs = list(vad.Segmenter().segments(vio.ArraySource(stream)))
+# adaptive=False: this fixture is two clean utterances with digital silence
+# between them, which has no room floor to track. The adaptive gate is for
+# CONTINUOUS noise and is measured in tools/, not here.
+segs = list(vad.Segmenter(adaptive=False).segments(vio.ArraySource(stream)))
 print("    segmenter found %d utterances in a 2-utterance stream" % len(segs))
 check("segmenter splits on the silence between utterances", len(segs) == 2,
       len(segs))

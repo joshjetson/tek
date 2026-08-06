@@ -35,8 +35,29 @@ class Segmenter(object):
     Yields int16 arrays at pcm.RATE.
     """
 
+    # --- noisy rooms ------------------------------------------------------
+    # WebRTC's VAD is a spectral classifier with FIXED thresholds. It does not
+    # adapt to how loud the room is, so in continuous background noise it calls
+    # nearly every frame speech, never sees the silence it needs to close an
+    # utterance, and emits blocks that run to max_utterance. Observed
+    # downstairs: every single segment exactly 15.0s, and free decoding turned
+    # "hey tek ears on" into "years arm hate tech ears are".
+    #
+    # The standard fix is not a different VAD, it is to pair it with a tracked
+    # NOISE FLOOR. A frame counts as speech only if WebRTC says so AND its
+    # energy beats the room's own recent floor by a margin. In a quiet room the
+    # floor is tiny and the margin costs nothing; in a loud one it is what
+    # stops the fridge, the television and the family from being speech.
+    #
+    # Tracked as a low percentile rather than a mean or a minimum: a mean is
+    # dragged up by the speech it is trying to exclude, and a true minimum is
+    # one unlucky quiet frame away from being useless.
+    FLOOR_WINDOW_S = 6.0        # how much history the floor is taken over
+    FLOOR_PCT = 20              # percentile of that history
+    SNR_MARGIN = 2.5            # how far a frame must beat the floor
+
     def __init__(self, aggressiveness=1, pre_roll=0.30, hang=0.60,
-                 min_speech=0.20, max_utterance=15.0):
+                 min_speech=0.20, max_utterance=6.0, adaptive=True):
         import webrtcvad
         # 0..3, where higher rejects more non-speech AND more quiet talkers.
         # Was 2, the usual choice for a room mic. Dropped to 1 because the
@@ -55,15 +76,41 @@ class Segmenter(object):
         self.pre_n = max(1, int(pre_roll * 1000 / pcm.FRAME_MS))
         self.hang_n = max(1, int(hang * 1000 / pcm.FRAME_MS))
         self.min_n = max(1, int(min_speech * 1000 / pcm.FRAME_MS))
+        # 6s, down from 15s. Human utterances are 1-5s; 15s was never a
+        # sentence, it was the segmenter giving up. Even where the floor gate
+        # cannot rescue segmentation entirely, a 6s block is short enough for a
+        # recogniser to make something of, where a 15s one is not.
         self.max_n = max(1, int(max_utterance * 1000 / pcm.FRAME_MS))
+        self.adaptive = adaptive
+        self._hist = collections.deque(
+            maxlen=max(8, int(self.FLOOR_WINDOW_S * 1000 / pcm.FRAME_MS)))
+        self.floor = 0.0
 
     def is_speech(self, frame):
         """WebRTC accepts only 10/20/30 ms frames at 8/16/32/48 kHz - which is
         exactly why pcm.FRAME_MS is 20 and pcm.RATE is 16000. Anything else
-        would need a second framing just for this."""
+        would need a second framing just for this.
+
+        With `adaptive`, WebRTC's answer is ANDed with an energy test against
+        the room's tracked floor - see the class comment. The floor is updated
+        from every frame including this one, so it follows the room rather than
+        needing to be configured for it.
+        """
         if len(frame) != pcm.FRAME:
             return False
-        return self.vad.is_speech(frame.tobytes(), pcm.RATE)
+        said = self.vad.is_speech(frame.tobytes(), pcm.RATE)
+        if not self.adaptive:
+            return said
+        x = frame.astype(np.float32) / 32768.0
+        rms = float(np.sqrt(np.mean(x * x)))
+        self._hist.append(rms)
+        # Needs enough history to mean anything; until then trust WebRTC alone
+        # rather than gating on a floor estimated from half a second.
+        if len(self._hist) >= self._hist.maxlen // 2:
+            self.floor = float(np.percentile(self._hist, self.FLOOR_PCT))
+        if not said:
+            return False
+        return rms > max(self.floor * self.SNR_MARGIN, 1e-5)
 
     def segments(self, source):
         pre = collections.deque(maxlen=self.pre_n)
