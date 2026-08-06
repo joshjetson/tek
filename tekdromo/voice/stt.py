@@ -50,6 +50,23 @@ WAKE_WORDS = ["hey tek", "hey tech", "hey tec", "hey tex", "hey deck",
               "ok tek", "ok tech", "okay tek", "okay tech"]
 WAKE_GRAMMAR = json.dumps(WAKE_WORDS + ["[unk]"])
 
+# A second constrained grammar, for the handful of CONTROL phrases that have to
+# work when nothing else does.
+#
+# Free decoding cannot do this job in a real room. The segmenter caps an
+# utterance at 15 s, and a continuously noisy room never gives it a silence to
+# close on, so every "utterance" is a 15-second block of everything at once.
+# Free-decoding that turned "hey tek ears on" into "years arm hate tech ears
+# are" - and no amount of fuzzy matching rescues a transcript like that.
+#
+# A grammar can only ever emit its own phrases or [unk], which is exactly why
+# the wake word survives the same 15-second blocks that destroy free decoding.
+# The control phrases deserve the same protection: they are the commands you
+# need most when the room is worst.
+CONTROL_WORDS = ["ears on", "ears off", "wake up", "go to sleep",
+                 "stop listening", "start listening", "be quiet"]
+CONTROL_GRAMMAR = json.dumps(WAKE_WORDS + CONTROL_WORDS + ["[unk]"])
+
 _MODEL = None
 
 

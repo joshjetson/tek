@@ -459,6 +459,10 @@ class Ears(object):
         # one costs memory for its decoder and nothing for the acoustic model.
         self.wake = None
         self.free = None
+        # Constrained to the wake words plus the control phrases. Used while
+        # asleep, where free decoding demonstrably cannot pick "ears on" out of
+        # a 15-second block of a noisy room. See stt.CONTROL_GRAMMAR.
+        self.control = None
         self.seg = None
         self.armed_until = 0.0
         # Consecutive commands taken WITHOUT a wake word. Reset by a real one.
@@ -518,6 +522,9 @@ class Ears(object):
         if self.wake is None:
             self.wake = stt.Recogniser(grammar=stt.WAKE_GRAMMAR)
             self.free = stt.Recogniser()
+            # Cheap: a grammar recogniser costs 1.1 ms to construct against
+            # 332 ms for a free one, and shares the same cached acoustic model.
+            self.control = stt.Recogniser(grammar=stt.CONTROL_GRAMMAR)
             self.seg = vad.Segmenter()
             print("ears: wake words %s" % (stt.WAKE_WORDS,), flush=True)
 
@@ -707,13 +714,17 @@ class Ears(object):
             # small lie to anybody trying to debug this.
             self.wakes += 1
             print("ears: asleep, woken by %r" % spotted, flush=True)
-            text = self.free.transcribe(samples)
-            rest = stt.strip_wake(text) or text
+            # The CONTROL grammar, not the free decoder. Free decoding a
+            # 15-second block of a noisy room turned "hey tek ears on" into
+            # "years arm hate tech ears are"; a grammar cannot produce that
+            # because it cannot produce anything outside its own vocabulary.
+            heard = self.control.transcribe(samples) if self.control else ""
+            rest = stt.strip_wake(heard) or heard
             if self._control(rest):
                 self._close_channel()
             else:
-                print("ears: asleep, ignoring %r - say 'hey tek ears on'"
-                      % rest, flush=True)
+                print("ears: asleep, heard %r - say 'hey tek ears on'"
+                      % heard, flush=True)
             return
 
         # -- radio protocol: the channel is open -----------------------

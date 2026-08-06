@@ -128,6 +128,10 @@ def make_ears(wake_script, free_script):
     e._t = None
     e.wake = FakeRec(wake_script)
     e.free = FakeRec(free_script)
+    # While asleep the CONTROL grammar is what is consulted, not the free
+    # decoder - free decoding a 15s block of a noisy room cannot find "ears
+    # on". Defaults to echoing the free script so existing tests are unchanged.
+    e.control = FakeRec(list(free_script))
     return e
 
 
@@ -340,7 +344,7 @@ check("...and does not dispatch it as a question", e.service.events == [],
 
 # Asleep: ordinary speech reaches nothing, even with a wake word in front.
 e.wake.script = ["hey tek [unk]"]
-e.free.script = ["hey tek what is the weather"]
+e.control.script = ["hey tek [unk]"]
 e._utterance(SPOKEN)
 check("asleep, even a wake word plus a question is ignored",
       e.service.events == [] and e.service.asleep is True, e.service.events)
@@ -354,7 +358,7 @@ check("asleep and unwoken, nothing is transcribed at all",
 
 # The one thing that gets through.
 e.wake.script = ["hey tek [unk]"]
-e.free.script = ["hey tek ears on"]
+e.control.script = ["hey tek ears on"]
 e._utterance(SPOKEN)
 check("'ears on' wakes it", e.service.asleep is False)
 
