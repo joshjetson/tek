@@ -159,6 +159,21 @@ for variant in stt.WAKE_WORDS:
 # either. Treat a single failure here as a prompt to re-run, and only chase it
 # if it repeats - but do NOT quietly delete the assertions, because they are
 # the ones guarding precision against the wake-word variants.
+# The garbage model is what makes this list passable at all. A constrained
+# grammar must map every sound onto its vocabulary, so with no decoys ordinary
+# speech has nowhere to go except the wake word. Measured on twenty lines of
+# family conversation: no decoys fired on 2 of 20 ("okay technically it's not"
+# -> "okay tek", "hey take a look at this" -> "hey tek"); with decoys, 0 of 20,
+# and no recall lost on 5 real wake words.
+check("the grammar carries decoys that are NOT accepted",
+      all(d not in stt.WAKE_WORDS for d in stt.WAKE_DECOYS)
+      and len(stt.WAKE_DECOYS) >= 6)
+check("'okay' is a decoy, not a wake word - it is the commonest word in a "
+      "kitchen", "okay" in stt.WAKE_DECOYS
+      and not any(w.startswith(("ok ", "okay ")) for w in stt.WAKE_WORDS))
+for phrase in ("[unk] okay tek [unk]", "hey take", "okay tech", "technically"):
+    check("does NOT wake on %r" % phrase, not stt.heard_wake(phrase))
+
 for ordinary in ("take the bins out", "check the oven please",
                  "hey there how are you",
                  "okay then lets go", "hey mum"):

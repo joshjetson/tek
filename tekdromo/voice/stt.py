@@ -46,26 +46,35 @@ DEFAULT_MODEL = os.path.join(MODEL_DIR, "vosk-model-small-en-us-0.15")
 # The extra spellings are not different wake words, they are the same one
 # heard badly. Deliberately excluded: "hey take", "hey check" and "hi tech",
 # which the probe shows would also fire but which people actually say.
-WAKE_WORDS = ["hey tek", "hey tech", "hey tec", "hey tex", "hey deck",
-              "ok tek", "ok tech", "okay tek", "okay tech"]
-WAKE_GRAMMAR = json.dumps(WAKE_WORDS + ["[unk]"])
+# The phrases that ACCEPT. Deliberately short, and deliberately not the whole
+# grammar - see WAKE_DECOYS.
+WAKE_WORDS = ["hey tek", "hey tech", "hey tec", "hey tex"]
 
-# A second constrained grammar, for the handful of CONTROL phrases that have to
-# work when nothing else does.
+# A GARBAGE MODEL. These are in the grammar so the recogniser has somewhere to
+# put the sounds, and are NOT accepted as a wake word.
 #
-# Free decoding cannot do this job in a real room. The segmenter caps an
-# utterance at 15 s, and a continuously noisy room never gives it a silence to
-# close on, so every "utterance" is a 15-second block of everything at once.
-# Free-decoding that turned "hey tek ears on" into "years arm hate tech ears
-# are" - and no amount of fuzzy matching rescues a transcript like that.
+# A constrained grammar must map every sound it hears onto something in its
+# vocabulary. Take the decoys away and ordinary speech has nowhere to go except
+# the wake word: measured on twenty lines of family conversation, an accept
+# list with no decoys fired on 2 of them - "okay technically it's not" became
+# "okay tek", and "hey take a look at this" became "hey tek". Adding the
+# decoys took that to 0 of 20 with no loss of recall on 5 real wake words.
 #
-# A grammar can only ever emit its own phrases or [unk], which is exactly why
-# the wake word survives the same 15-second blocks that destroy free decoding.
-# The control phrases deserve the same protection: they are the commands you
-# need most when the room is worst.
+# This is also why PRUNING the list made things worse rather than better. The
+# nine-variant list fired on 4 of 20; cutting it to "hey tek" alone still fired
+# on 2, because the variants had been doing decoy duty by accident. The bug was
+# never that there were too many phrases - it was that "ok tek" and "okay tech"
+# were decoys that COUNTED. "Okay" is one of the most common words in a family
+# kitchen, so those two were firing on nothing at all.
+WAKE_DECOYS = ["hey take", "hey there", "hey the", "hey", "take",
+               "technically", "tech", "text", "deck", "okay", "ok"]
+
+WAKE_GRAMMAR = json.dumps(WAKE_WORDS + WAKE_DECOYS + ["[unk]"])
+
 CONTROL_WORDS = ["ears on", "ears off", "wake up", "go to sleep",
                  "stop listening", "start listening", "be quiet"]
-CONTROL_GRAMMAR = json.dumps(WAKE_WORDS + CONTROL_WORDS + ["[unk]"])
+CONTROL_GRAMMAR = json.dumps(WAKE_WORDS + WAKE_DECOYS + CONTROL_WORDS
+                             + ["[unk]"])
 
 _MODEL = None
 
