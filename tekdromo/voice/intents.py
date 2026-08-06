@@ -75,12 +75,81 @@ _RESUME = re.compile(
     r"you\s+awake|listen\s+up|come\s+back)\b", re.I)
 
 
+# Phrases to match by SIMILARITY, not by spelling. A literal match failed the
+# first time it met a real room:
+#
+#   said:  "hey tek ears on"
+#   heard: "personally hate it cause that age hate tech years on"
+#
+# "ears on" came back as "years on" and the regex refused it. Listing variants
+# does not converge - stt.py already learned that for the wake word and
+# replaced a variant list with a similarity test for exactly this reason. The
+# same argument applies here and for the same reason: a small model in a room
+# mishears short words endlessly, and there is always one more spelling.
+# Swept, not picked. 0.72 still took "how many years old is the house" as
+# "ears on"; 0.76 and above keeps all five real mishearings and drops every
+# decoy. 0.80 is the middle of the band that works.
+_FUZZ = 0.80
+
+_SLEEP_PHRASES = ("ears off", "stop listening", "go to sleep", "be quiet",
+                  "shut up", "go deaf", "leave us alone", "stop talking")
+_RESUME_PHRASES = ("ears on", "start listening", "wake up", "listen up",
+                   "come back", "are you awake")
+
+
+def _fuzzy_score(text, phrases):
+    """Best similarity between any window of `text` and any of `phrases`.
+
+    Windowed rather than whole-string, because the transcript around a command
+    is usually junk: "hate tech years on" scores 0.42 against "ears on" taken
+    whole and 0.86 taken two words at a time.
+    """
+    import difflib
+    words = [w.strip(".,!?") for w in (text or "").lower().split()]
+    if not words:
+        return 0.0
+    best = 0.0
+    for phrase in phrases:
+        n = len(phrase.split())
+        for i in range(0, max(1, len(words) - n + 1)):
+            window = " ".join(words[i:i + n])
+            r = difflib.SequenceMatcher(None, window, phrase).ratio()
+            if r > best:
+                best = r
+    return best
+
+
+def classify(text):
+    """'sleep', 'resume' or None. The two are decided TOGETHER, on purpose.
+
+    "ears on" and "ears off" score 0.800 against each other - they differ by
+    one letter and it is the letter that carries the entire meaning. Testing
+    them in sequence means whichever is checked first wins, and the first
+    version checked sleep first, so "hey tek ears on" put it to sleep instead
+    of waking it. The test caught it; a room would have caught it later and
+    less pleasantly.
+
+    Comparing both and taking the better score is the only version that is not
+    an accident of ordering.
+    """
+    t = text or ""
+    s_hit = bool(_SLEEP.search(t))
+    r_hit = bool(_RESUME.search(t))
+    if s_hit != r_hit:                       # an exact match, unambiguous
+        return "sleep" if s_hit else "resume"
+    s = _fuzzy_score(t, _SLEEP_PHRASES)
+    r = _fuzzy_score(t, _RESUME_PHRASES)
+    if max(s, r) < _FUZZ:
+        return None
+    return "sleep" if s > r else "resume"
+
+
 def wants_sleep(text):
-    return bool(_SLEEP.search(text or ""))
+    return classify(text) == "sleep"
 
 
 def wants_resume(text):
-    return bool(_RESUME.search(text or ""))
+    return classify(text) == "resume"
 
 
 _FORGET = re.compile(

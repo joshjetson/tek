@@ -358,6 +358,22 @@ e.free.script = ["hey tek ears on"]
 e._utterance(SPOKEN)
 check("'ears on' wakes it", e.service.asleep is False)
 
+# The mishearing that actually happened. "hey tek ears on" came back from the
+# room as "personally hate it cause that age hate tech years on" - the wake
+# word fired and a literal match for "ears on" refused it, so it stayed
+# asleep and nothing anywhere said why.
+from tekdromo.voice import intents as _I                # noqa: E402
+check("'years on' is taken as 'ears on'",
+      _I.classify("personally hate it cause that age hate tech years on")
+      == "resume")
+# ...and the pair must be decided TOGETHER. They score 0.800 against each
+# other and differ by the one letter that carries the meaning, so testing
+# them in sequence means whichever is checked first wins.
+check("'ears on' is not mistaken for 'ears off'",
+      _I.classify("ears on") == "resume")
+check("'ears off' is not mistaken for 'ears on'",
+      _I.classify("ears off") == "sleep")
+
 
 # -- noise must not become a question --------------------------------------
 # An open channel drops the level and word-count gates, because the person

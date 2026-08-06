@@ -702,6 +702,10 @@ class Ears(object):
                           % (spotted, secs, peak, _level_hint(peak)),
                           flush=True)
                 return
+            # Count it. The counters said "0 were the wake word" through an
+            # entire evening of the thing waking correctly, which is its own
+            # small lie to anybody trying to debug this.
+            self.wakes += 1
             print("ears: asleep, woken by %r" % spotted, flush=True)
             text = self.free.transcribe(samples)
             rest = stt.strip_wake(text) or text
