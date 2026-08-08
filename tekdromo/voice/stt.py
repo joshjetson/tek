@@ -195,13 +195,27 @@ class Recogniser(object):
 def heard_wake(text):
     """Did a wake-grammar result actually contain the wake word?
 
-    The grammar decoder still emits "[unk]" and fragments, so the caller cannot
-    simply treat any non-empty result as a trigger.
+    Matched on WHOLE WORDS, not as a substring, and that distinction is the
+    entire point. A substring test made the garbage model fire the thing it
+    exists to absorb:
+
+        'hey technically'  contains 'hey tech'   -> woke
+        'hey text'         contains 'hey tex'    -> woke
+
+    Twelve false wakes in twelve hours, every one of them a decoy being read
+    as an accept word because it happened to start with the same letters. The
+    decoys were doing their job - the grammar put the sound on "technically" -
+    and the test then threw that away.
     """
     if not text:
         return False
-    t = text.lower()
-    return any(w in t for w in WAKE_WORDS)
+    words = text.lower().replace(",", " ").split()
+    for w in WAKE_WORDS:
+        n = w.split()
+        for i in range(len(words) - len(n) + 1):
+            if words[i:i + len(n)] == n:
+                return True
+    return False
 
 
 # ---------------------------------------------------------------------------

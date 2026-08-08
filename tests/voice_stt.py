@@ -174,6 +174,17 @@ check("'okay' is a decoy, not a wake word - it is the commonest word in a "
 for phrase in ("[unk] okay tek [unk]", "hey take", "okay tech", "technically"):
     check("does NOT wake on %r" % phrase, not stt.heard_wake(phrase))
 
+# Whole words, not substrings. A substring test made the garbage model fire the
+# very thing it exists to absorb - twelve false wakes in twelve hours, every one
+# a decoy read as an accept word because it starts with the same letters.
+for phrase in ("hey technically", "hey technically technically", "hey text",
+               "the hey technically"):
+    check("a decoy CONTAINING a wake word does not fire: %r" % phrase,
+          not stt.heard_wake(phrase))
+for phrase in ("hey tek", "hey tek [unk]", "[unk] hey tek [unk]", "hey tech"):
+    check("the real wake word still fires: %r" % phrase,
+          stt.heard_wake(phrase))
+
 for ordinary in ("take the bins out", "check the oven please",
                  "hey there how are you",
                  "okay then lets go", "hey mum"):
