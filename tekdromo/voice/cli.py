@@ -144,10 +144,21 @@ def main(argv=None):
     p.add_argument("what", nargs="?", choices=["stop", "quiet"], default="stop",
                    help="stop: just the display. quiet: the voice as well.")
 
+    p = sub.add_parser("mic", help="capture gain, persisted")
+    p.add_argument("pct", nargs="?", type=int,
+                   help="0-100. PulseAudio's scale is CUBIC: 100%%=0dB, "
+                        "75%%=-7.5dB, 50%%=-18dB. Lowering it cost the wake "
+                        "word entirely once.")
+
     sub.add_parser("interrupt", help="stop the current reply now")
     p = sub.add_parser("barge",
                        help="barge-in: talk over a reply to stop it")
     p.add_argument("state", nargs="?", choices=["on", "off"], default=None)
+
+    sub.add_parser("sleep",
+                   help="stop responding, but keep the mic open so "
+                        "'hey tek ears on' still works")
+    sub.add_parser("wake", help="undo `tek sleep`")
 
     sub.add_parser("status", help="service state")
     sub.add_parser("voices", help="which voices work here")
@@ -405,6 +416,31 @@ def main(argv=None):
         recog.note_enrolled(name, len(recog.samples(name)))
         print("  enrolled %s with %d samples; the display picks it up within "
               "a few seconds" % (name, got))
+        return 0
+
+    if a.cmd in ("sleep", "wake"):
+        c = _client(a.socket, timeout=15.0)
+        if c is None:
+            return 1
+        r = c.request({"cmd": "sleep", "on": a.cmd == "sleep"}) or {}
+        c.close()
+        print("  asleep     %s" % r.get("asleep"))
+        if r.get("asleep"):
+            print("  say 'hey tek ears on' to wake it, or `tek wake`")
+        return 0
+
+    if a.cmd == "mic":
+        from .service import load_settings, save_settings
+        from . import ears as _ears
+        if a.pct is not None:
+            save_settings({"mic_gain": max(0, min(100, a.pct))})
+            print("  mic gain -> %d%% (applies when the ear next opens; "
+                  "`tek ears off` then `on` to apply now)"
+                  % max(0, min(100, a.pct)))
+        cur = load_settings().get("mic_gain", _ears.MIC_GAIN_PCT)
+        print("  mic gain   %s%%" % cur)
+        print("  note       working wake words on this box peak 0.49-0.75 at "
+              "100%; below that they stop firing")
         return 0
 
     if a.cmd == "interrupt":

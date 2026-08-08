@@ -33,6 +33,7 @@ face at 30 fps.
 """
 import collections
 import os
+import re
 import threading
 import time
 import traceback
@@ -145,6 +146,24 @@ SNAPSHOT = os.path.expanduser("~/.cache/tekdromo/seen.jpg")
 SNAPSHOT_FRESH = 20.0
 
 RETRY_S = 2.0
+
+# Where near-miss audio is kept, and how much of it.
+#
+# This exists because every fix to the wake word for two weeks was validated
+# against SYNTHESISED audio, and synthesis cannot reproduce the failure. On
+# this box, measured: the wake grammar fires on Piper speech down to a peak of
+# 0.212, and it still fires at 0 dB SNR against babble - speech and noise at
+# equal power. Meanwhile the real room produced 160 near misses and 2 wakes in
+# fourteen hours.
+#
+# So the synthetic corpus proves nothing about the room, and the only honest
+# way to fix a recogniser is to test it against audio that actually failed.
+# Keeping the last few misses on disk turns "it does not work" into a file.
+#
+# Bounded and local: a small ring of WAV files under ~/.cache, overwritten in
+# turn, never uploaded, and only written while the ear is actually listening.
+MISS_DIR = os.path.expanduser("~/.cache/tekdromo/misses")
+MISS_KEEP = 24
 
 # How often to check that the ear is listening to something real, and how long
 # without any audio counts as deaf. Both are cheap: the check reuses a cached
@@ -708,6 +727,11 @@ class Ears(object):
                     print("ears: ASLEEP near miss %r (%.1fs, peak %.3f)%s"
                           % (spotted, secs, peak, _level_hint(peak)),
                           flush=True)
+                    # Only NEAR misses, not every scrap of room noise: a bare
+                    # "[unk]" is somebody talking in the house and there are
+                    # dozens an hour, while "hey [unk]" is a wake attempt that
+                    # got away and is worth having on disk.
+                    self._save_miss(samples, "asleep", spotted)
                 return
             # Count it. The counters said "0 were the wake word" through an
             # entire evening of the thing waking correctly, which is its own
@@ -878,6 +902,33 @@ class Ears(object):
             self.armed_until = time.monotonic() + self.window
             print("ears: woken (%.1fs) - waiting %.0fs for a command"
                   % (secs, self.window), flush=True)
+
+    def _save_miss(self, samples, tag, got):
+        """Keep the audio of a near miss, so it can be tested against later.
+
+        The single most useful thing this project can have and did not: a
+        corpus of the exact utterances that failed, in the room they failed in.
+        Everything else is guessing with extra steps.
+        """
+        try:
+            import wave
+            if not os.path.isdir(MISS_DIR):
+                os.makedirs(MISS_DIR)
+            files = sorted(f for f in os.listdir(MISS_DIR) if f.endswith(".wav"))
+            while len(files) >= MISS_KEEP:
+                os.remove(os.path.join(MISS_DIR, files.pop(0)))
+            name = "%s-%s-%s.wav" % (time.strftime("%H%M%S"), tag,
+                                     re.sub(r"[^a-z0-9]+", "_",
+                                            (got or "none").lower())[:24])
+            path = os.path.join(MISS_DIR, name)
+            w = wave.open(path, "wb")
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(pcm.RATE)
+            w.writeframes(np.asarray(samples, dtype=pcm.DTYPE).tobytes())
+            w.close()
+        except Exception:
+            pass
 
     def _control(self, text):
         """Sleep and wake, acted on immediately. True if it was handled.

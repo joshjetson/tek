@@ -122,6 +122,43 @@ Two rules:
   import migrate` gives you the convenience *function*, not the module — the
   package exports `migrate_mod`, `db_mod`, `recall_mod`, `store_mod` for that.
 
+## The bug this project keeps producing
+
+Nearly every defect found over two weeks of work on the voice path was the
+same shape: **two mechanisms that are each individually correct and disagree
+with each other.** None were logic errors. All of them read fine on the page.
+
+  * `tek watch off` saved the setting; the startup path set `watching = True`
+    unconditionally. Both correct, and it turned itself back on every restart.
+  * `tek ears off` saved `listening = False`; `main()` ran
+    `svc.listening = not a.no_ears`, and store_true defaults to False.
+  * The confidence gate rejected noise; the idle timer counted that same
+    rejected noise as activity, so the channel never closed.
+  * The channel idle timeout lived in the utterance handler, so a quiet room
+    never reached it - a timeout that only fires when somebody speaks.
+  * `channel_open` was published only on change; the display subscribed after
+    the change and never learned it.
+  * A hard mute closes the microphone; the voice command to undo it needs an
+    open microphone. Two features that cannot both work.
+
+Before adding state, ask: **who else decides this, and what happens when they
+disagree?** A setting with two writers is a bug that has not surfaced yet.
+
+## Do not test a recogniser against synthesised speech
+
+Measured on this box: the wake grammar fires on Piper speech down to a peak of
+0.212, and still fires at **0 dB SNR** against babble - speech and noise at
+equal power. The same period produced 160 near misses and 2 wakes in the real
+room.
+
+So a synthetic corpus proves nothing about a room, and every wake-word fix
+validated that way was a guess wearing a measurement's clothes. Near-miss audio
+is now kept in `~/.cache/tekdromo/misses/` for exactly this reason: test
+against the utterances that actually failed.
+
+`tools/wake_tune.py` records the real person; `tools/wake_probe.py` only asks
+Piper and answers a weaker question.
+
 ## Do not break the display
 
 `tek-display` renders at ~30 fps and the project's central invariant is that it

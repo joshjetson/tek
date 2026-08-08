@@ -425,6 +425,11 @@ class VoiceService(object):
         # "ears", not "listen": `tek listen` already means "print the mouth
         # frames as they are published", and two different meanings for one
         # word in the same tool is a trap for whoever reads it next.
+        if cmd == "sleep":
+            if "on" in msg:
+                self.asleep = bool(msg["on"])
+            return {"ok": True, "asleep": self._asleep}
+
         if cmd == "ears" and "on" in msg:
             save_settings({"listening": bool(msg["on"])})
 
