@@ -252,6 +252,25 @@ def _level_hint(peak):
     return ""
 
 
+def _stop_phrase(text):
+    """Is that an order to stop, said at any time, wake word or not?
+
+    Matched on whole words against the constrained grammar's own output, so
+    "technically" and friends cannot reach it. Narrow on purpose: these are
+    phrases nobody says to another person by accident in a kitchen, which is
+    what earns them the right to work without a handshake.
+    """
+    if not text:
+        return False
+    words = text.lower().replace(",", " ").split()
+    for phrase in ("ears off", "stop listening", "go to sleep", "be quiet"):
+        n = phrase.split()
+        for i in range(len(words) - len(n) + 1):
+            if words[i:i + len(n)] == n:
+                return True
+    return False
+
+
 class Gate(vio.Source):
     """Passes the microphone through, except while the face is speaking.
 
@@ -539,7 +558,9 @@ class Ears(object):
         """
         from . import vad
         if self.wake is None:
-            self.wake = stt.Recogniser(grammar=stt.WAKE_GRAMMAR)
+            # CONTROL_GRAMMAR, not WAKE_GRAMMAR, for the ALWAYS-ON pass.
+            # "Stop" has to work without a handshake - see _stop_phrase.
+            self.wake = stt.Recogniser(grammar=stt.CONTROL_GRAMMAR)
             self.free = stt.Recogniser()
             # Cheap: a grammar recogniser costs 1.1 ms to construct against
             # 332 ms for a free one, and shares the same cached acoustic model.
@@ -703,6 +724,42 @@ class Ears(object):
         self.utterances += 1
         secs = len(samples) / float(pcm.RATE)
 
+        # -- STOP, at any time, with no wake word ------------------------
+        # "Tek ears off" was said repeatedly and nothing happened, because it
+        # needed a wake word first and the wake word was failing at 0.15-0.29
+        # peak. That is exactly backwards: a stop command is the thing you say
+        # BECAUSE the device is not listening properly, so making it depend on
+        # the same handshake that is broken guarantees it fails when it is most
+        # needed.
+        #
+        # Safe to have always on because it is decided by the constrained
+        # grammar, which can only emit its own phrases - it cannot transcribe
+        # the household to reach this, and the phrases are ones nobody says to
+        # each other by accident.
+        # Only when the channel is CLOSED. With it open the free decode runs
+        # anyway and _control catches the same phrases from it, so decoding
+        # twice would be pure cost - and the wake grammar is not free at 0.11x
+        # real time on a board already holding 29fps.
+        if (not getattr(self.service, "asleep", False)
+                and not self.channel_open):
+            spotted_any = self.wake.transcribe(samples)
+            if _stop_phrase(spotted_any):
+                print("ears: STOP heard %r - going to sleep (no wake word "
+                      "needed)" % spotted_any, flush=True)
+                self.parts = []
+                self._close_channel()
+                self.service.asleep = True
+                try:
+                    self.service.interrupt("told to stop")
+                except Exception:
+                    pass
+                try:
+                    self.service.say("Ears off.", wait=False)
+                except Exception:
+                    pass
+                return
+            self._spotted = spotted_any
+
         # -- asleep: hear the wake word and nothing else ----------------
         # The microphone stays open and the WAKE GRAMMAR still runs, which is
         # what makes "hey tek, ears on" possible at all - a mute that can only
@@ -820,9 +877,12 @@ class Ears(object):
                 self._send_turn(secs)
             return
 
-        # The cheap pass. This grammar can only return the wake phrases or
-        # "[unk]", so ordinary conversation cannot be transcribed by it.
-        spotted = self.wake.transcribe(samples)
+        # Already transcribed by the always-on stop pass above; reuse it
+        # rather than paying for a second decode of the same audio.
+        spotted = getattr(self, "_spotted", None)
+        if spotted is None:
+            spotted = self.wake.transcribe(samples)
+        self._spotted = None
         if not stt.heard_wake(spotted):
             # Log the near miss. "Sometimes it says nothing" is impossible to
             # diagnose without knowing WHICH stage dropped it - the grammar is

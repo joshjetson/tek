@@ -132,6 +132,7 @@ def make_ears(wake_script, free_script):
     # decoder - free decoding a 15s block of a noisy room cannot find "ears
     # on". Defaults to echoing the free script so existing tests are unchanged.
     e.control = FakeRec(list(free_script))
+    e._spotted = None
     return e
 
 
@@ -329,6 +330,23 @@ for _ in range(ears.CHANNEL_MAX_PARTS):
 check("a missed OVER answers anyway rather than holding forever",
       len(e.service.events) == 1, e.service.events)
 
+
+# -- STOP works with no wake word, at any time -----------------------------
+# "Tek ears off" was said repeatedly and nothing happened: it needed a wake
+# word first, and the wake word was failing at 0.15-0.29 peak. A stop command
+# is the thing you say BECAUSE the device is not listening properly, so making
+# it depend on the same broken handshake guarantees it fails when most needed.
+
+for phrase in ("ears off", "tek ears off", "stop listening", "be quiet"):
+    check("stop phrase recognised: %r" % phrase, ears._stop_phrase(phrase))
+for phrase in ("technically", "hey tek", "ears on", "the weather is off"):
+    check("not a stop phrase: %r" % phrase, not ears._stop_phrase(phrase))
+
+# No wake word anywhere in it, and it still stops.
+e = make_ears(["tek ears off"], ["ignored"])
+e._utterance(SPOKEN)
+check("stops with NO wake word at all", e.service.asleep is True)
+check("...and dispatches nothing", e.service.events == [], e.service.events)
 
 # -- "hey tek ears off" / "hey tek ears on" --------------------------------
 # Asleep is NOT the microphone closing. If it were, nothing could hear "ears
